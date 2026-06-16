@@ -834,17 +834,20 @@ finish_prepare_screenshot (char *initial_uri, GdkWindow *window, GdkRectangle *r
     {
       screenshot = screenshot_get_pixbuf (window, rectangle, include_pointer, include_border, include_mask);
 
-      switch (border_effect[0])
+      if (screenshot != NULL)
         {
-        case 's': /* shadow */
-          screenshot_add_shadow (&screenshot);
-          break;
-        case 'b': /* border */
-          screenshot_add_border (&screenshot);
-          break;
-        case 'n': /* none */
-        default:
-          break;
+          switch (border_effect[0])
+            {
+            case 's': /* shadow */
+              screenshot_add_shadow (&screenshot);
+              break;
+            case 'b': /* border */
+              screenshot_add_border (&screenshot);
+              break;
+            case 'n': /* none */
+            default:
+              break;
+            }
         }
     }
 
@@ -1045,7 +1048,8 @@ find_current_window (void)
       window = screenshot_find_current_window ();
       if (!window)
 	{
-	  take_window_shot = FALSE;
+	  if (!screenshot_is_wayland ())
+	    take_window_shot = FALSE;
 	  window = gdk_get_default_root_window ();
 	}
     }

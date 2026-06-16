@@ -30,6 +30,7 @@
 #endif
 #ifdef MATE_SCREENSHOT_ENABLE_WAYLAND
 #include <gdk/gdkwayland.h>
+#include <wayland-client.h>
 #endif
 #include <gdk/gdkkeysyms.h>
 #include <gtk/gtk.h>
@@ -53,6 +54,12 @@ is_wayland (void)
 #else
   return FALSE;
 #endif
+}
+
+gboolean
+screenshot_is_wayland (void)
+{
+  return is_wayland ();
 }
 
 /* To make sure there is only one screenshot taken at a time,
@@ -715,6 +722,373 @@ mask_monitors (GdkPixbuf *pixbuf, GdkWindow *root_window)
 
 #ifdef MATE_SCREENSHOT_ENABLE_WAYLAND
 typedef struct {
+  struct wl_proxy *proxy;
+  gchar *identifier;
+  gchar *title;
+  gchar *app_id;
+  gboolean closed;
+} WaylandToplevel;
+
+typedef struct {
+  struct wl_proxy *toplevel_list;
+  GPtrArray *toplevels;
+} WaylandToplevelContext;
+
+static const struct wl_message ext_foreign_toplevel_handle_v1_requests[] = {
+  { "destroy", "", NULL },
+};
+
+static const struct wl_message ext_foreign_toplevel_handle_v1_events[] = {
+  { "closed", "", NULL },
+  { "done", "", NULL },
+  { "title", "s", NULL },
+  { "app_id", "s", NULL },
+  { "identifier", "s", NULL },
+};
+
+static const struct wl_interface ext_foreign_toplevel_handle_v1_interface = {
+  "ext_foreign_toplevel_handle_v1",
+  1,
+  G_N_ELEMENTS (ext_foreign_toplevel_handle_v1_requests),
+  ext_foreign_toplevel_handle_v1_requests,
+  G_N_ELEMENTS (ext_foreign_toplevel_handle_v1_events),
+  ext_foreign_toplevel_handle_v1_events
+};
+
+static const struct wl_interface *ext_foreign_toplevel_list_v1_types[] = {
+  &ext_foreign_toplevel_handle_v1_interface,
+};
+
+static const struct wl_message ext_foreign_toplevel_list_v1_requests[] = {
+  { "stop", "", NULL },
+  { "destroy", "", NULL },
+};
+
+static const struct wl_message ext_foreign_toplevel_list_v1_events[] = {
+  { "toplevel", "n", ext_foreign_toplevel_list_v1_types },
+  { "finished", "", NULL },
+};
+
+static const struct wl_interface ext_foreign_toplevel_list_v1_interface = {
+  "ext_foreign_toplevel_list_v1",
+  1,
+  G_N_ELEMENTS (ext_foreign_toplevel_list_v1_requests),
+  ext_foreign_toplevel_list_v1_requests,
+  G_N_ELEMENTS (ext_foreign_toplevel_list_v1_events),
+  ext_foreign_toplevel_list_v1_events
+};
+
+static void
+wayland_toplevel_free (WaylandToplevel *toplevel)
+{
+  if (!toplevel)
+    return;
+
+  if (toplevel->proxy)
+    wl_proxy_marshal_flags (toplevel->proxy,
+                            0,
+                            NULL,
+                            wl_proxy_get_version (toplevel->proxy),
+                            WL_MARSHAL_FLAG_DESTROY);
+
+  g_free (toplevel->identifier);
+  g_free (toplevel->title);
+  g_free (toplevel->app_id);
+  g_free (toplevel);
+}
+
+static void
+wayland_toplevel_closed (void *data,
+                         void *handle)
+{
+  WaylandToplevel *toplevel = data;
+
+  toplevel->closed = TRUE;
+}
+
+static void
+wayland_toplevel_done (void *data,
+                       void *handle)
+{
+}
+
+static void
+wayland_toplevel_title (void       *data,
+                        void       *handle,
+                        const char *title)
+{
+  WaylandToplevel *toplevel = data;
+
+  g_free (toplevel->title);
+  toplevel->title = g_strdup (title);
+}
+
+static void
+wayland_toplevel_app_id (void       *data,
+                         void       *handle,
+                         const char *app_id)
+{
+  WaylandToplevel *toplevel = data;
+
+  g_free (toplevel->app_id);
+  toplevel->app_id = g_strdup (app_id);
+}
+
+static void
+wayland_toplevel_identifier (void       *data,
+                             void       *handle,
+                             const char *identifier)
+{
+  WaylandToplevel *toplevel = data;
+
+  g_free (toplevel->identifier);
+  toplevel->identifier = g_strdup (identifier);
+}
+
+static const struct {
+  void (*closed)     (void *data, void *handle);
+  void (*done)       (void *data, void *handle);
+  void (*title)      (void *data, void *handle, const char *title);
+  void (*app_id)     (void *data, void *handle, const char *app_id);
+  void (*identifier) (void *data, void *handle, const char *identifier);
+} wayland_toplevel_listener = {
+  wayland_toplevel_closed,
+  wayland_toplevel_done,
+  wayland_toplevel_title,
+  wayland_toplevel_app_id,
+  wayland_toplevel_identifier
+};
+
+static void
+wayland_toplevel_list_toplevel (void            *data,
+                                void            *list,
+                                struct wl_proxy *handle)
+{
+  WaylandToplevelContext *context = data;
+  WaylandToplevel *toplevel;
+
+  toplevel = g_new0 (WaylandToplevel, 1);
+  toplevel->proxy = handle;
+
+  wl_proxy_add_listener (handle,
+                         (void (**)(void)) &wayland_toplevel_listener,
+                         toplevel);
+
+  g_ptr_array_add (context->toplevels, toplevel);
+}
+
+static void
+wayland_toplevel_list_finished (void *data,
+                                void *list)
+{
+}
+
+static const struct {
+  void (*toplevel) (void *data, void *list, struct wl_proxy *handle);
+  void (*finished) (void *data, void *list);
+} wayland_toplevel_list_listener = {
+  wayland_toplevel_list_toplevel,
+  wayland_toplevel_list_finished
+};
+
+static void
+wayland_registry_global (void               *data,
+                         struct wl_registry *registry,
+                         uint32_t            name,
+                         const char         *interface,
+                         uint32_t            version)
+{
+  WaylandToplevelContext *context = data;
+
+  if (g_strcmp0 (interface, "ext_foreign_toplevel_list_v1") == 0 &&
+      context->toplevel_list == NULL)
+    {
+      context->toplevel_list = wl_registry_bind (registry,
+                                                 name,
+                                                 &ext_foreign_toplevel_list_v1_interface,
+                                                 1);
+      wl_proxy_add_listener (context->toplevel_list,
+                             (void (**)(void)) &wayland_toplevel_list_listener,
+                             context);
+    }
+}
+
+static void
+wayland_registry_global_remove (void               *data,
+                                struct wl_registry *registry,
+                                uint32_t            name)
+{
+}
+
+static const struct wl_registry_listener wayland_registry_listener = {
+  wayland_registry_global,
+  wayland_registry_global_remove
+};
+
+static gboolean
+wayland_toplevel_is_candidate (WaylandToplevel *toplevel)
+{
+  if (toplevel->closed || !toplevel->identifier || *toplevel->identifier == '\0')
+    return FALSE;
+
+  if (g_strcmp0 (toplevel->app_id, "mate-screenshot") == 0)
+    return FALSE;
+
+  return TRUE;
+}
+
+static gchar *
+wayland_select_toplevel_identifier (GPtrArray *toplevels)
+{
+  GtkWidget *dialog;
+  GtkWidget *content;
+  GtkWidget *scrolled;
+  GtkWidget *tree;
+  GtkListStore *store;
+  GtkTreeViewColumn *column;
+  GtkCellRenderer *renderer;
+  GtkTreeSelection *selection;
+  GtkTreeIter iter;
+  gchar *identifier = NULL;
+  guint candidates = 0;
+  guint i;
+
+  for (i = 0; i < toplevels->len; i++)
+    {
+      WaylandToplevel *toplevel = g_ptr_array_index (toplevels, i);
+
+      if (!wayland_toplevel_is_candidate (toplevel))
+        continue;
+
+      candidates++;
+      identifier = toplevel->identifier;
+    }
+
+  if (candidates == 0)
+    return NULL;
+
+  if (candidates == 1)
+    return g_strdup (identifier);
+
+  dialog = gtk_dialog_new_with_buttons (_("Select Window"),
+                                        NULL,
+                                        GTK_DIALOG_MODAL,
+                                        _("_Cancel"),
+                                        GTK_RESPONSE_CANCEL,
+                                        _("_Capture"),
+                                        GTK_RESPONSE_ACCEPT,
+                                        NULL);
+  gtk_window_set_default_size (GTK_WINDOW (dialog), 480, 320);
+
+  content = gtk_dialog_get_content_area (GTK_DIALOG (dialog));
+  scrolled = gtk_scrolled_window_new (NULL, NULL);
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scrolled),
+                                  GTK_POLICY_AUTOMATIC,
+                                  GTK_POLICY_AUTOMATIC);
+  gtk_box_pack_start (GTK_BOX (content), scrolled, TRUE, TRUE, 0);
+
+  store = gtk_list_store_new (2, G_TYPE_STRING, G_TYPE_STRING);
+
+  for (i = 0; i < toplevels->len; i++)
+    {
+      WaylandToplevel *toplevel = g_ptr_array_index (toplevels, i);
+      gchar *label;
+
+      if (!wayland_toplevel_is_candidate (toplevel))
+        continue;
+
+      if (toplevel->title && toplevel->app_id)
+        label = g_strdup_printf ("%s - %s", toplevel->title, toplevel->app_id);
+      else
+        label = g_strdup (toplevel->title ? toplevel->title : toplevel->app_id);
+
+      gtk_list_store_append (store, &iter);
+      gtk_list_store_set (store, &iter,
+                          0, label ? label : _("Untitled Window"),
+                          1, toplevel->identifier,
+                          -1);
+      g_free (label);
+    }
+
+  tree = gtk_tree_view_new_with_model (GTK_TREE_MODEL (store));
+  g_object_unref (store);
+
+  renderer = gtk_cell_renderer_text_new ();
+  column = gtk_tree_view_column_new_with_attributes (_("Window"),
+                                                     renderer,
+                                                     "text", 0,
+                                                     NULL);
+  gtk_tree_view_append_column (GTK_TREE_VIEW (tree), column);
+  gtk_container_add (GTK_CONTAINER (scrolled), tree);
+
+  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (tree));
+  gtk_tree_selection_set_mode (selection, GTK_SELECTION_BROWSE);
+  if (gtk_tree_model_get_iter_first (GTK_TREE_MODEL (store), &iter))
+    gtk_tree_selection_select_iter (selection, &iter);
+
+  gtk_widget_show_all (dialog);
+
+  if (gtk_dialog_run (GTK_DIALOG (dialog)) == GTK_RESPONSE_ACCEPT &&
+      gtk_tree_selection_get_selected (selection, NULL, &iter))
+    {
+      gtk_tree_model_get (GTK_TREE_MODEL (store), &iter,
+                          1, &identifier,
+                          -1);
+    }
+  else
+    {
+      identifier = NULL;
+    }
+
+  gtk_widget_destroy (dialog);
+
+  return identifier;
+}
+
+static gchar *
+wayland_get_toplevel_identifier (void)
+{
+  GdkDisplay *gdk_display;
+  struct wl_display *display;
+  struct wl_registry *registry;
+  WaylandToplevelContext context;
+  gchar *identifier = NULL;
+
+  gdk_display = gdk_display_get_default ();
+  if (!GDK_IS_WAYLAND_DISPLAY (gdk_display))
+    return NULL;
+
+  display = gdk_wayland_display_get_wl_display (gdk_display);
+  if (!display)
+    return NULL;
+
+  context.toplevel_list = NULL;
+  context.toplevels = g_ptr_array_new_with_free_func ((GDestroyNotify) wayland_toplevel_free);
+
+  registry = wl_display_get_registry (display);
+  wl_registry_add_listener (registry, &wayland_registry_listener, &context);
+
+  wl_display_roundtrip (display);
+  if (context.toplevel_list)
+    wl_display_roundtrip (display);
+
+  if (context.toplevel_list)
+    identifier = wayland_select_toplevel_identifier (context.toplevels);
+
+  if (context.toplevel_list)
+    wl_proxy_marshal_flags (context.toplevel_list,
+                            1,
+                            NULL,
+                            wl_proxy_get_version (context.toplevel_list),
+                            WL_MARSHAL_FLAG_DESTROY);
+
+  wl_registry_destroy (registry);
+  g_ptr_array_unref (context.toplevels);
+
+  return identifier;
+}
+
+typedef struct {
   GMainLoop *loop;
   gchar *uri;
   gboolean timeout;
@@ -807,6 +1181,96 @@ screenshot_get_pixbuf_grim (GdkRectangle *rectangle)
     g_bytes_unref (stderr_bytes);
   g_object_unref (process);
   g_free (geometry);
+
+  return pixbuf;
+}
+
+static GdkPixbuf *
+screenshot_get_pixbuf_grim_toplevel (const gchar *identifier)
+{
+  GSubprocess *process;
+  GBytes *stdout_bytes = NULL;
+  GBytes *stderr_bytes = NULL;
+  GInputStream *stream;
+  GdkPixbuf *pixbuf = NULL;
+  GError *error = NULL;
+  const gchar *argv[] = { "grim", "-T", NULL, "-", NULL };
+
+  if (!identifier || *identifier == '\0')
+    return NULL;
+
+  argv[2] = identifier;
+
+  process = g_subprocess_newv (argv,
+                               G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                               G_SUBPROCESS_FLAGS_STDERR_PIPE,
+                               &error);
+  if (!process)
+    {
+      g_warning ("Error launching grim toplevel fallback: %s", error->message);
+      g_error_free (error);
+      return NULL;
+    }
+
+  if (!g_subprocess_communicate (process, NULL, NULL,
+                                 &stdout_bytes, &stderr_bytes, &error))
+    {
+      g_warning ("Error reading grim toplevel fallback output: %s", error->message);
+      g_error_free (error);
+      g_object_unref (process);
+      return NULL;
+    }
+
+  if (!g_subprocess_get_successful (process))
+    {
+      const gchar *stderr_data = NULL;
+      gsize stderr_size = 0;
+
+      if (stderr_bytes)
+        stderr_data = g_bytes_get_data (stderr_bytes, &stderr_size);
+
+      if (stderr_data && stderr_size > 0)
+        g_warning ("grim toplevel fallback failed: %.*s", (gint) stderr_size, stderr_data);
+      else
+        g_warning ("grim toplevel fallback failed");
+
+      if (stdout_bytes)
+        g_bytes_unref (stdout_bytes);
+      if (stderr_bytes)
+        g_bytes_unref (stderr_bytes);
+      g_object_unref (process);
+      return NULL;
+    }
+
+  stream = g_memory_input_stream_new_from_bytes (stdout_bytes);
+  pixbuf = gdk_pixbuf_new_from_stream (stream, NULL, &error);
+  if (!pixbuf)
+    {
+      g_warning ("Error loading screenshot from grim toplevel fallback: %s", error->message);
+      g_error_free (error);
+    }
+
+  g_object_unref (stream);
+  g_bytes_unref (stdout_bytes);
+  if (stderr_bytes)
+    g_bytes_unref (stderr_bytes);
+  g_object_unref (process);
+
+  return pixbuf;
+}
+
+static GdkPixbuf *
+screenshot_get_pixbuf_wayland_toplevel (void)
+{
+  GdkPixbuf *pixbuf;
+  gchar *identifier;
+
+  identifier = wayland_get_toplevel_identifier ();
+  if (!identifier)
+    return NULL;
+
+  pixbuf = screenshot_get_pixbuf_grim_toplevel (identifier);
+  g_free (identifier);
 
   return pixbuf;
 }
@@ -996,9 +1460,6 @@ screenshot_get_pixbuf (GdkWindow    *window,
 #ifdef MATE_SCREENSHOT_ENABLE_WAYLAND
   if (is_wayland ())
     {
-      /* If include_mask is FALSE, it means the user wants to capture a specific window
-       * or area (not full screen). The basic portal doesn't support specific window capture
-       * directly without UI, so we fall back to the interactive portal. */
       gboolean interactive = !include_mask;
       GdkPixbuf *pixbuf;
 
@@ -1007,6 +1468,18 @@ screenshot_get_pixbuf (GdkWindow    *window,
           pixbuf = screenshot_get_pixbuf_grim (rectangle);
           if (pixbuf)
             return pixbuf;
+        }
+
+      /* Window capture on Wayland needs compositor or portal support.  A raw
+       * slurp selection without predefined window boxes is area capture, not
+       * window capture, so keep the window mode on the portal path. */
+      if (interactive)
+        {
+          pixbuf = screenshot_get_pixbuf_wayland_toplevel ();
+          if (pixbuf)
+            return pixbuf;
+
+          return screenshot_get_pixbuf_portal (TRUE);
         }
 
       if (!interactive)

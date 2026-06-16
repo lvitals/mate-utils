@@ -395,7 +395,7 @@ AS_IF([test "x$have_systemd" = "xyes"],
 AM_CONDITIONAL([HAVE_SYSTEMD], [test "x$have_systemd" = "xyes"])
 
 dnl Wayland support for mate-screenshot
-PKG_CHECK_MODULES([SCREENSHOT_WAYLAND], [gdk-wayland-3.0],
+PKG_CHECK_MODULES([SCREENSHOT_WAYLAND], [gdk-wayland-3.0 wayland-client],
                   [have_gdk_wayland=yes],
                   [have_gdk_wayland=no])
 

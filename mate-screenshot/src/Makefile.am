@@ -65,6 +65,7 @@ mate_screenshot_LDADD =			\
 	$(GTHREAD_LIBS)			\
 	$(GTK_LIBS)			\
 	$(SCREENSHOT_WAYLAND_LIBS)	\
+	-lwayland-client		\
 	-lm
 
 screenshot-resources.h screenshot-resources.c: $(srcdir)/../data/org.mate.screenshot.gresource.xml Makefile $(shell $(GLIB_COMPILE_RESOURCES) --generate-dependencies --sourcedir $(srcdir)/../data $(srcdir)/../data/org.mate.screenshot.gresource.xml)
