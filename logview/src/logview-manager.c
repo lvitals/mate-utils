@@ -164,9 +164,10 @@ create_log_cb (LogviewLog *log,
 
     prefs = logview_prefs_get ();
     file = logview_log_get_gfile (log);
-    logview_prefs_store_log (prefs, file);
-
-    g_object_unref (file);
+    if (file) {
+      logview_prefs_store_log (prefs, file);
+      g_object_unref (file);
+    }
 
     g_signal_emit (data->manager, signals[LOG_ADDED], 0, log, NULL);
 
@@ -334,10 +335,12 @@ logview_manager_set_active_log (LogviewManager *manager,
   manager->priv->active_log = g_object_ref (log);
 
   file = logview_log_get_gfile (log);
-  path = g_file_get_path (file);
-  logview_prefs_store_active_logfile (logview_prefs_get (), path);
-  g_free (path);
-  g_object_unref (file);
+  if (file) {
+    path = g_file_get_path (file);
+    logview_prefs_store_active_logfile (logview_prefs_get (), path);
+    g_free (path);
+    g_object_unref (file);
+  }
 
   g_signal_emit (manager, signals[ACTIVE_CHANGED], 0, log, old_log, NULL);
 
@@ -448,9 +451,10 @@ logview_manager_close_active_log (LogviewManager *manager)
 
   g_signal_emit (manager, signals[LOG_CLOSED], 0, active_log, NULL);
 
-  logview_prefs_remove_stored_log (logview_prefs_get (), file);
-
-  g_object_unref (file);
+  if (file) {
+    logview_prefs_remove_stored_log (logview_prefs_get (), file);
+    g_object_unref (file);
+  }
 
   /* drop the hash table ref */
   g_hash_table_remove (manager->priv->logs, log_uri);

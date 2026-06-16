@@ -255,6 +255,118 @@ add_new_days_to_cache (LogviewLog *log, const char **new_lines, guint lines_offs
   return new_days;
 }
 
+#ifdef HAVE_SYSTEMD
+static gchar *
+journal_entry_to_line (sd_journal *journal)
+{
+  uint64_t usec;
+  const void *data_msg, *data_host, *data_comm, *data_pid;
+  size_t len_msg, len_host, len_comm, len_pid;
+  GDateTime *dt;
+  gchar *date_str;
+  gchar *line;
+  const char *host_val;
+  int host_len;
+  const char *comm_str;
+  int comm_prefix_len;
+  const char *comm_val;
+  int comm_len;
+  const char *pid_val;
+  int pid_len;
+  const char *msg_val;
+  int msg_len;
+
+  if (sd_journal_get_data (journal, "MESSAGE", &data_msg, &len_msg) < 0)
+    return NULL;
+
+  if (sd_journal_get_realtime_usec (journal, &usec) < 0)
+    usec = (uint64_t) time (NULL) * 1000000;
+
+  dt = g_date_time_new_from_unix_local (usec / 1000000);
+  date_str = g_date_time_format (dt, "%b %e %H:%M:%S");
+  g_date_time_unref (dt);
+
+  if (sd_journal_get_data (journal, "_HOSTNAME", &data_host, &len_host) < 0) {
+    data_host = "_HOSTNAME=localhost";
+    len_host = strlen (data_host);
+  }
+
+  if (sd_journal_get_data (journal, "SYSLOG_IDENTIFIER", &data_comm, &len_comm) < 0) {
+    if (sd_journal_get_data (journal, "_COMM", &data_comm, &len_comm) < 0) {
+      data_comm = "_COMM=unknown";
+      len_comm = strlen (data_comm);
+    }
+  }
+
+  if (sd_journal_get_data (journal, "_PID", &data_pid, &len_pid) < 0) {
+    data_pid = "_PID=0";
+    len_pid = strlen (data_pid);
+  }
+
+  host_val = (const char *)data_host + strlen ("_HOSTNAME=");
+  host_len = len_host - strlen ("_HOSTNAME=");
+
+  comm_str = (const char *)data_comm;
+  comm_prefix_len = 0;
+  if (g_str_has_prefix (comm_str, "SYSLOG_IDENTIFIER="))
+    comm_prefix_len = strlen ("SYSLOG_IDENTIFIER=");
+  else if (g_str_has_prefix (comm_str, "_COMM="))
+    comm_prefix_len = strlen ("_COMM=");
+  comm_val = comm_str + comm_prefix_len;
+  comm_len = len_comm - comm_prefix_len;
+
+  pid_val = (const char *)data_pid + strlen ("_PID=");
+  pid_len = len_pid - strlen ("_PID=");
+
+  msg_val = (const char *)data_msg + strlen ("MESSAGE=");
+  msg_len = len_msg - strlen ("MESSAGE=");
+
+  line = g_strdup_printf ("%s %.*s %.*s[%.*s]: %.*s",
+                          date_str,
+                          host_len, host_val,
+                          comm_len, comm_val,
+                          pid_len, pid_val,
+                          msg_len, msg_val);
+  g_free (date_str);
+
+  return line;
+}
+
+static GSList *
+read_journal_entries_to_cache (LogviewLog *log)
+{
+  GPtrArray *lines;
+  GSList *days;
+  gchar *line;
+  int r;
+
+  if (!log->priv->lines) {
+    log->priv->lines = g_ptr_array_new ();
+    g_ptr_array_add (log->priv->lines, NULL);
+  }
+
+  lines = log->priv->lines;
+  g_ptr_array_remove_index (lines, lines->len - 1);
+
+  while ((r = sd_journal_next (log->priv->journal)) > 0) {
+    line = journal_entry_to_line (log->priv->journal);
+    if (line)
+      g_ptr_array_add (lines, (gpointer) line);
+  }
+
+  g_ptr_array_add (lines, NULL);
+
+  days = add_new_days_to_cache (log,
+                                (const char **) lines->pdata + log->priv->lines_no,
+                                log->priv->lines_no);
+  log->priv->lines_no = lines->len - 1;
+  log->priv->has_days = (log->priv->days != NULL);
+  log->priv->has_new_lines = FALSE;
+
+  return days;
+}
+#endif
+
 static void
 new_lines_job_done (GObject      *source_object,
                     GAsyncResult *res,
@@ -294,6 +406,19 @@ do_read_new_lines (GTask        *task,
 
   g_assert (LOGVIEW_IS_LOG (log));
 
+#ifdef HAVE_SYSTEMD
+  if (log->priv->journal) {
+    guint lines_no;
+
+    lines_no = log->priv->lines_no;
+    job->new_days = read_journal_entries_to_cache (log);
+    lines = log->priv->lines;
+    job->lines = (const char **) lines->pdata + lines_no;
+    g_task_return_boolean (task, TRUE);
+    return;
+  }
+#endif
+
   if (!log->priv->lines) {
     log->priv->lines = g_ptr_array_new ();
     g_ptr_array_add (log->priv->lines, NULL);
@@ -304,86 +429,11 @@ do_read_new_lines (GTask        *task,
   /* remove the NULL-terminator */
   g_ptr_array_remove_index (lines, lines->len - 1);
 
-#ifdef HAVE_SYSTEMD
-  if (log->priv->journal) {
-    int r;
-    uint64_t usec;
-    const void *data_msg, *data_host, *data_comm, *data_pid;
-    size_t len_msg, len_host, len_comm, len_pid;
-    GDateTime *dt;
-    gchar *date_str;
-    const char *host_val;
-    int host_len;
-    const char *comm_str;
-    int comm_prefix_len;
-    const char *comm_val;
-    int comm_len;
-    const char *pid_val;
-    int pid_len;
-    const char *msg_val;
-    int msg_len;
-
-    while ((r = sd_journal_next (log->priv->journal)) > 0) {
-      r = sd_journal_get_data (log->priv->journal, "MESSAGE", &data_msg, &len_msg);
-      if (r < 0) continue;
-
-      sd_journal_get_realtime_usec (log->priv->journal, &usec);
-      dt = g_date_time_new_from_unix_local (usec / 1000000);
-      date_str = g_date_time_format (dt, "%b %e %H:%M:%S");
-      g_date_time_unref (dt);
-
-      if (sd_journal_get_data (log->priv->journal, "_HOSTNAME", &data_host, &len_host) < 0) {
-        data_host = "_HOSTNAME=localhost";
-        len_host = 19;
-      }
-
-      if (sd_journal_get_data (log->priv->journal, "SYSLOG_IDENTIFIER", &data_comm, &len_comm) < 0) {
-        if (sd_journal_get_data (log->priv->journal, "_COMM", &data_comm, &len_comm) < 0) {
-          data_comm = "_COMM=unknown";
-          len_comm = 13;
-        }
-      }
-
-      if (sd_journal_get_data (log->priv->journal, "_PID", &data_pid, &len_pid) < 0) {
-        data_pid = "_PID=0";
-        len_pid = 6;
-      }
-
-      /* +10 for _HOSTNAME=, +18 for SYSLOG_IDENTIFIER= or +6 for _COMM=, +5 for _PID=, +8 for MESSAGE= */
-      host_val = (const char *)data_host + 10;
-      host_len = len_host - 10;
-
-      comm_str = (const char *)data_comm;
-      comm_prefix_len = 0;
-      if (g_str_has_prefix (comm_str, "SYSLOG_IDENTIFIER=")) comm_prefix_len = 18;
-      else if (g_str_has_prefix (comm_str, "_COMM=")) comm_prefix_len = 6;
-      comm_val = comm_str + comm_prefix_len;
-      comm_len = len_comm - comm_prefix_len;
-
-      pid_val = (const char *)data_pid + 5;
-      pid_len = len_pid - 5;
-
-      msg_val = (const char *)data_msg + 8;
-      msg_len = len_msg - 8;
-
-      line = g_strdup_printf ("%s %.*s %.*s[%.*s]: %.*s",
-                              date_str,
-                              host_len, host_val,
-                              comm_len, comm_val,
-                              pid_len, pid_val,
-                              msg_len, msg_val);
-      g_ptr_array_add (lines, (gpointer) line);
-      g_free (date_str);
-    }
-  } else
-#endif
+  g_assert (log->priv->stream != NULL);
+  while ((line = g_data_input_stream_read_line (log->priv->stream, NULL,
+                                                cancellable, &err)) != NULL)
   {
-    g_assert (log->priv->stream != NULL);
-    while ((line = g_data_input_stream_read_line (log->priv->stream, NULL,
-                                                  cancellable, &err)) != NULL)
-    {
-      g_ptr_array_add (lines, (gpointer) line);
-    }
+    g_ptr_array_add (lines, (gpointer) line);
   }
 
   /* NULL-terminate the array again */
@@ -391,6 +441,7 @@ do_read_new_lines (GTask        *task,
 
   if (err) {
     g_task_return_error (task, err);
+    return;
   }
 
   log->priv->has_new_lines = FALSE;
@@ -751,8 +802,12 @@ log_load (GTask        *task,
 
 #ifdef HAVE_SYSTEMD
   if (log->priv->journal) {
+    GSList *days;
+
     log->priv->display_name = g_strdup (_("Systemd Journal"));
     log->priv->file_time = time (NULL);
+    days = read_journal_entries_to_cache (log);
+    g_slist_free_full (days, (GDestroyNotify) logview_utils_day_free);
     g_task_return_boolean (task, TRUE);
     return;
   }
@@ -919,6 +974,7 @@ log_load (GTask        *task,
 out:
   if (err) {
     g_task_return_error (task, err);
+    return;
   }
 
   g_task_return_boolean (task, TRUE);
@@ -1097,6 +1153,11 @@ logview_log_get_uri (LogviewLog *log)
 {
   g_assert (LOGVIEW_IS_LOG (log));
 
+#ifdef HAVE_SYSTEMD
+  if (log->priv->journal)
+    return g_strdup ("systemd-journal://");
+#endif
+
   return g_file_get_uri (log->priv->file);
 }
 
@@ -1104,6 +1165,9 @@ GFile *
 logview_log_get_gfile (LogviewLog *log)
 {
   g_assert (LOGVIEW_IS_LOG (log));
+
+  if (log->priv->file == NULL)
+    return NULL;
 
   return g_object_ref (log->priv->file);
 }

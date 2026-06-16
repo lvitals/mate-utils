@@ -255,10 +255,6 @@ logview_app_first_time_initialize (LogviewApp *app)
    * in /etc/syslog.conf.
    */
 
-#ifdef HAVE_SYSTEMD
-  logview_manager_add_systemd_journal (app->priv->manager);
-#endif
-
   logs = parse_syslog ();
 
   job = g_slice_new0 (EnumerateJob);
@@ -334,6 +330,10 @@ logview_app_initialize (LogviewApp *app, char **log_files)
   g_assert (LOGVIEW_IS_APP (app));
 
   priv = app->priv;
+
+#ifdef HAVE_SYSTEMD
+  logview_manager_add_systemd_journal (priv->manager);
+#endif
 
   /* open regular logs and add each log passed as a parameter */
 
