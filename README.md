@@ -1,7 +1,7 @@
 [![Translation status](https://translate.fedoraproject.org/widget/mate-desktop/svg-badge.svg)](https://translate.fedoraproject.org/engage/mate-desktop/)
 
-mate-utils
-=========================
+# mate-utils
+
 Contains MATE Utility programs for the MATE Desktop, namely the following:
 
 * mate-system-log          [logview]
@@ -10,11 +10,12 @@ Contains MATE Utility programs for the MATE Desktop, namely the following:
 * mate-screenshot          [mate-screenshot]
 * mate-disk-usage-analyzer [baobab]
 
-mate-utils is a fork of GNOME Utilities. 
+mate-utils is a fork of GNOME Utilities.
+
 This software is licensed under the GNU GPL. For more on the license, see COPYING.
 
-Requirements
-========================
+## Requirements
+
 * intltool                 >= 0.50.1
 * mate-common              >= 1.24.1
 * GLib                     >= 2.50.0
@@ -24,10 +25,40 @@ Requirements
 * libgtop                  >= 2.12.0
 * libcanberra-gtk          >= 0.4
 
-The following configure flags can be used:
+## Optional Dependencies
 
-  `--enable-zlib`: Enable ZLib support for Logview [default=yes]
+* systemd                  (systemd journal support in Logview)
+* gdk-wayland-3.0          (Wayland support in mate-screenshot)
 
-  `--with-grep`: Specify the path to the grep command [default=find it ourselves]
+## Optional Runtime Dependencies
 
-  `--enable-debug`: Enable debug messages [default=no]
+The following components are recommended when running mate-screenshot under Wayland:
+
+* xdg-desktop-portal       (desktop portal integration)
+* xdg-desktop-portal-wlr   (wlroots portal backend)
+* grim                     (Wayland screenshot backend)
+* slurp                    (interactive area selection)
+
+Without these components, screenshot functionality may be limited when running under a Wayland session.
+
+## Configure Flags
+
+* `--enable-zlib`  
+  Enable ZLib support for Logview.  
+  Default: `yes`
+
+* `--enable-systemd`  
+  Enable systemd journal support in Logview.  
+  Default: `auto`
+
+* `--enable-wayland`  
+  Enable Wayland support in mate-screenshot.  
+  Default: `auto`
+
+* `--with-grep`  
+  Specify the path to the grep command.  
+  Default: auto-detected
+
+* `--enable-debug`  
+  Enable debug messages.  
+  Default: `no`
