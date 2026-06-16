@@ -107,6 +107,8 @@ gboolean      logview_log_has_new_lines             (LogviewLog *log);
 char *        logview_log_get_uri                   (LogviewLog *log);
 GFile *       logview_log_get_gfile                 (LogviewLog *log);
 gboolean      logview_log_get_has_days              (LogviewLog *log);
+gboolean      logview_log_is_systemd_journal        (LogviewLog *log);
+gboolean      logview_log_has_more_lines            (LogviewLog *log);
 
 G_END_DECLS
 

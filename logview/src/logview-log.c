@@ -45,6 +45,10 @@ enum {
 
 static guint signals [LAST_SIGNAL] = { 0 };
 
+#ifdef HAVE_SYSTEMD
+#define JOURNAL_READ_BATCH 500
+#endif
+
 struct _LogviewLogPrivate {
   /* file and monitor */
   GFile *file;
@@ -53,6 +57,7 @@ struct _LogviewLogPrivate {
 #ifdef HAVE_SYSTEMD
   sd_journal *journal;
   guint journal_watch_id;
+  gboolean journal_has_more;
 #endif
 
   /* stats about the file */
@@ -256,8 +261,51 @@ add_new_days_to_cache (LogviewLog *log, const char **new_lines, guint lines_offs
 }
 
 #ifdef HAVE_SYSTEMD
+static Day *
+journal_find_day (GSList *days,
+                  GDate  *date)
+{
+  GSList *l;
+
+  for (l = days; l; l = l->next) {
+    Day *day = l->data;
+
+    if (g_date_compare (day->date, date) == 0)
+      return day;
+  }
+
+  return NULL;
+}
+
+static void
+journal_update_days (GSList **days,
+                     GDate  *date,
+                     guint   line,
+                     gint    timestamp_len)
+{
+  Day *day;
+
+  day = journal_find_day (*days, date);
+  if (day) {
+    day->first_line = MIN (day->first_line, line);
+    day->last_line = MAX (day->last_line, line);
+    g_date_free (date);
+    return;
+  }
+
+  day = g_slice_new0 (Day);
+  day->date = date;
+  day->first_line = line;
+  day->last_line = line;
+  day->timestamp_len = timestamp_len;
+
+  *days = g_slist_prepend (*days, day);
+}
+
 static gchar *
-journal_entry_to_line (sd_journal *journal)
+journal_entry_to_line (sd_journal *journal,
+                       GDate     **entry_date,
+                       gint       *timestamp_len)
 {
   uint64_t usec;
   const void *data_msg, *data_host, *data_comm, *data_pid;
@@ -284,6 +332,13 @@ journal_entry_to_line (sd_journal *journal)
 
   dt = g_date_time_new_from_unix_local (usec / 1000000);
   date_str = g_date_time_format (dt, "%b %e %H:%M:%S");
+  if (entry_date) {
+    *entry_date = g_date_new_dmy (g_date_time_get_day_of_month (dt),
+                                  g_date_time_get_month (dt),
+                                  g_date_time_get_year (dt));
+  }
+  if (timestamp_len)
+    *timestamp_len = strlen (date_str);
   g_date_time_unref (dt);
 
   if (sd_journal_get_data (journal, "_HOSTNAME", &data_host, &len_host) < 0) {
@@ -336,9 +391,14 @@ static GSList *
 read_journal_entries_to_cache (LogviewLog *log)
 {
   GPtrArray *lines;
-  GSList *days;
+  GSList *new_days = NULL;
   gchar *line;
-  int r;
+  GDate *entry_date;
+  gint timestamp_len;
+  guint old_lines_no;
+  guint line_no;
+  guint read_count;
+  int r = 0;
 
   if (!log->priv->lines) {
     log->priv->lines = g_ptr_array_new ();
@@ -348,22 +408,41 @@ read_journal_entries_to_cache (LogviewLog *log)
   lines = log->priv->lines;
   g_ptr_array_remove_index (lines, lines->len - 1);
 
-  while ((r = sd_journal_next (log->priv->journal)) > 0) {
-    line = journal_entry_to_line (log->priv->journal);
-    if (line)
+  old_lines_no = log->priv->lines_no;
+  read_count = 0;
+  while (read_count < JOURNAL_READ_BATCH &&
+         (r = sd_journal_previous (log->priv->journal)) > 0) {
+    entry_date = NULL;
+    timestamp_len = 0;
+    line = journal_entry_to_line (log->priv->journal, &entry_date, &timestamp_len);
+    if (line) {
       g_ptr_array_add (lines, (gpointer) line);
+      line_no = old_lines_no + read_count;
+
+      if (entry_date) {
+        journal_update_days (&log->priv->days,
+                             g_date_new_julian (g_date_get_julian (entry_date)),
+                             line_no,
+                             timestamp_len);
+        journal_update_days (&new_days, entry_date, read_count, timestamp_len);
+      }
+
+      read_count++;
+    }
   }
+
+  if (r <= 0)
+    log->priv->journal_has_more = FALSE;
 
   g_ptr_array_add (lines, NULL);
 
-  days = add_new_days_to_cache (log,
-                                (const char **) lines->pdata + log->priv->lines_no,
-                                log->priv->lines_no);
   log->priv->lines_no = lines->len - 1;
+  log->priv->days = g_slist_sort (log->priv->days, days_compare);
+  new_days = g_slist_sort (new_days, days_compare);
   log->priv->has_days = (log->priv->days != NULL);
   log->priv->has_new_lines = FALSE;
 
-  return days;
+  return new_days;
 }
 #endif
 
@@ -456,44 +535,6 @@ do_read_new_lines (GTask        *task,
   g_task_return_boolean (task, TRUE);
 }
 
-#ifdef HAVE_SYSTEMD
-static gboolean
-journal_callback (GIOChannel *source, GIOCondition condition, gpointer data)
-{
-  LogviewLog *log = data;
-
-  if (condition & (G_IO_HUP | G_IO_ERR | G_IO_NVAL))
-    {
-      log->priv->journal_watch_id = 0;
-      return FALSE;
-    }
-
-  sd_journal_process (log->priv->journal);
-  log->priv->has_new_lines = TRUE;
-  g_signal_emit (log, signals[LOG_CHANGED], 0);
-
-  return TRUE;
-}
-
-static void
-setup_journal_monitor (LogviewLog *log)
-{
-  int fd, events;
-  GIOChannel *channel;
-
-  fd = sd_journal_get_fd (log->priv->journal);
-  if (fd < 0) {
-    return;
-  }
-
-  events = sd_journal_get_events (log->priv->journal);
-
-  channel = g_io_channel_unix_new (fd);
-  log->priv->journal_watch_id = g_io_add_watch (channel, events, journal_callback, log);
-  g_io_channel_unref (channel);
-}
-#endif
-
 static void
 log_load_done (GObject      *source_object,
                GAsyncResult *res,
@@ -511,9 +552,7 @@ log_load_done (GObject      *source_object,
   } else {
     job->callback (job->log, NULL, job->user_data);
 #ifdef HAVE_SYSTEMD
-    if (job->log->priv->journal) {
-      setup_journal_monitor (job->log);
-    } else
+    if (!job->log->priv->journal)
 #endif
     {
       setup_file_monitor (job->log);
@@ -1065,9 +1104,9 @@ logview_log_create_systemd_journal (LogviewCreateCallback callback,
     return;
   }
 
+  log->priv->journal_has_more = TRUE;
+
   r = sd_journal_seek_tail (log->priv->journal);
-  if (r >= 0)
-    r = sd_journal_previous_skip (log->priv->journal, 200);
 
   if (r < 0) {
     GError *error;
@@ -1178,4 +1217,29 @@ logview_log_get_has_days (LogviewLog *log)
   g_assert (LOGVIEW_IS_LOG (log));
 
   return log->priv->has_days;
+}
+
+gboolean
+logview_log_is_systemd_journal (LogviewLog *log)
+{
+  g_assert (LOGVIEW_IS_LOG (log));
+
+#ifdef HAVE_SYSTEMD
+  return log->priv->journal != NULL;
+#else
+  return FALSE;
+#endif
+}
+
+gboolean
+logview_log_has_more_lines (LogviewLog *log)
+{
+  g_assert (LOGVIEW_IS_LOG (log));
+
+#ifdef HAVE_SYSTEMD
+  if (log->priv->journal)
+    return log->priv->journal_has_more;
+#endif
+
+  return FALSE;
 }
