@@ -1126,6 +1126,7 @@ active_log_changed_cb (LogviewManager *manager,
 
   lines = logview_log_get_cached_lines (log);
   buffer = gtk_text_buffer_new (window->priv->tag_table);
+  gtk_text_view_set_buffer (GTK_TEXT_VIEW (window->priv->text_view), buffer);
 
   if (lines != NULL) {
     int i;
@@ -1142,6 +1143,7 @@ active_log_changed_cb (LogviewManager *manager,
     }
 
     paint_timestamps (buffer, 1, logview_log_get_days_for_cached_lines (log));
+    filter_buffer (window, 0);
   }
 
   if (lines == NULL || logview_log_has_new_lines (log)) {
@@ -1153,12 +1155,6 @@ active_log_changed_cb (LogviewManager *manager,
                                                  G_CALLBACK (log_monitor_changed_cb), window);
   }
 
-  /* we set the buffer to the view anyway;
-   * if there are no lines it will be empty for the duration of the thread
-   * and will help us to distinguish the two cases of the following if
-   * cause in the callback.
-   */
-  gtk_text_view_set_buffer (GTK_TEXT_VIEW (window->priv->text_view), buffer);
   g_object_unref (buffer);
 }
 
@@ -1586,4 +1582,3 @@ logview_window_add_errors (LogviewWindow *window,
   g_free (primary);
   g_free (secondary);
 }
-

@@ -307,10 +307,17 @@ manager_log_added_cb (LogviewManager *manager,
                       LOG_OBJECT, g_object_ref (log),
                       LOG_NAME, logview_log_get_display_name (log), -1);
   if (logview_log_get_has_days (log)) {
-    gtk_tree_store_insert (list->priv->model,
-                           &child, &iter, 0);
-    gtk_tree_store_set (list->priv->model, &child,
-                        LOG_NAME, _("Loading..."), -1);
+    GSList *days;
+
+    days = logview_log_get_days_for_cached_lines (log);
+    if (days) {
+      update_days_and_lines_for_log (list, &iter, days);
+    } else {
+      gtk_tree_store_insert (list->priv->model,
+                             &child, &iter, 0);
+      gtk_tree_store_set (list->priv->model, &child,
+                          LOG_NAME, _("Loading..."), -1);
+    }
   }
 
   g_signal_connect (log, "log-changed",
@@ -343,15 +350,35 @@ loglist_sort_func (GtkTreeModel *model,
 {
   char *name_a, *name_b;
   Day *day_a, *day_b;
+  LogviewLog *log_a, *log_b;
+  char *uri_a, *uri_b;
+  gboolean systemd_a, systemd_b;
   int retval = 0;
 
   switch (gtk_tree_store_iter_depth (GTK_TREE_STORE (model), a)) {
     case 0:
-      gtk_tree_model_get (model, a, LOG_NAME, &name_a, -1);
-      gtk_tree_model_get (model, b, LOG_NAME, &name_b, -1);
-      retval = g_utf8_collate (name_a, name_b);
+      gtk_tree_model_get (model, a, LOG_OBJECT, &log_a, LOG_NAME, &name_a, -1);
+      gtk_tree_model_get (model, b, LOG_OBJECT, &log_b, LOG_NAME, &name_b, -1);
+
+      uri_a = log_a ? logview_log_get_uri (log_a) : NULL;
+      uri_b = log_b ? logview_log_get_uri (log_b) : NULL;
+      systemd_a = g_strcmp0 (uri_a, "systemd-journal://") == 0;
+      systemd_b = g_strcmp0 (uri_b, "systemd-journal://") == 0;
+
+      if (systemd_a != systemd_b) {
+        retval = systemd_a ? -1 : 1;
+      } else {
+        retval = g_utf8_collate (name_a, name_b);
+      }
+
+      g_free (uri_a);
+      g_free (uri_b);
       g_free (name_a);
       g_free (name_b);
+      if (log_a)
+        g_object_unref (log_a);
+      if (log_b)
+        g_object_unref (log_b);
 
       break;
     case 1:
@@ -492,4 +519,3 @@ logview_loglist_update_lines (LogviewLoglist *loglist, LogviewLog *log)
     gtk_tree_iter_free (parent);
   }
 }
-
