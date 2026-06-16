@@ -45,27 +45,27 @@ mate_screenshot_SOURCES =		\
 	screenshot-xfer.c		\
 	screenshot-xfer.h
 
-mate_screenshot_CFLAGS =                \
-        $(GLIB_CFLAGS)                  \
-        $(GIO_CFLAGS)                   \
-        $(LIBCANBERRA_GTK_CFLAGS)       \
-        $(GTHREAD_CFLAGS)               \
-        $(GTK_CFLAGS)                   \
-        $(SCREENSHOT_WAYLAND_CFLAGS)    \
-        $(WARN_CFLAGS)                  \
-        $(NULL)
+mate_screenshot_CFLAGS =		\
+	$(GLIB_CFLAGS)			\
+	$(GIO_CFLAGS)			\
+	$(LIBCANBERRA_GTK_CFLAGS)	\
+	$(GTHREAD_CFLAGS)		\
+	$(GTK_CFLAGS)			\
+	$(SCREENSHOT_WAYLAND_CFLAGS)	\
+	$(WARN_CFLAGS)			\
+	$(NULL)
 
 mate_screenshot_LDFLAGS = -export-dynamic
 
-mate_screenshot_LDADD =                 \
-        $(XSHAPE_LIBS)                  \
-        $(GLIB_LIBS)                    \
-        $(GIO_LIBS)                     \
-        $(LIBCANBERRA_GTK_LIBS)         \
-        $(GTHREAD_LIBS)                 \
-        $(GTK_LIBS)                     \
-        $(SCREENSHOT_WAYLAND_LIBS)      \
-        -lm
+mate_screenshot_LDADD =			\
+	$(XSHAPE_LIBS)			\
+	$(GLIB_LIBS)			\
+	$(GIO_LIBS)			\
+	$(LIBCANBERRA_GTK_LIBS)		\
+	$(GTHREAD_LIBS)			\
+	$(GTK_LIBS)			\
+	$(SCREENSHOT_WAYLAND_LIBS)	\
+	-lm
 
 screenshot-resources.h screenshot-resources.c: $(srcdir)/../data/org.mate.screenshot.gresource.xml Makefile $(shell $(GLIB_COMPILE_RESOURCES) --generate-dependencies --sourcedir $(srcdir)/../data $(srcdir)/../data/org.mate.screenshot.gresource.xml)
 	$(AM_V_GEN) XMLLINT=$(XMLLINT) $(GLIB_COMPILE_RESOURCES) --target $@ --sourcedir $(srcdir)/../data --generate --c-name screenshot $<
