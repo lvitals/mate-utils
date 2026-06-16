@@ -310,21 +310,33 @@ do_read_new_lines (GTask        *task,
     uint64_t usec;
     const void *data_msg, *data_host, *data_comm, *data_pid;
     size_t len_msg, len_host, len_comm, len_pid;
+    GDateTime *dt;
+    gchar *date_str;
+    const char *host_val;
+    int host_len;
+    const char *comm_str;
+    int comm_prefix_len;
+    const char *comm_val;
+    int comm_len;
+    const char *pid_val;
+    int pid_len;
+    const char *msg_val;
+    int msg_len;
 
     while ((r = sd_journal_next (log->priv->journal)) > 0) {
       r = sd_journal_get_data (log->priv->journal, "MESSAGE", &data_msg, &len_msg);
       if (r < 0) continue;
 
       sd_journal_get_realtime_usec (log->priv->journal, &usec);
-      GDateTime *dt = g_date_time_new_from_unix_local (usec / 1000000);
-      gchar *date_str = g_date_time_format (dt, "%b %e %H:%M:%S");
+      dt = g_date_time_new_from_unix_local (usec / 1000000);
+      date_str = g_date_time_format (dt, "%b %e %H:%M:%S");
       g_date_time_unref (dt);
 
       if (sd_journal_get_data (log->priv->journal, "_HOSTNAME", &data_host, &len_host) < 0) {
         data_host = "_HOSTNAME=localhost";
         len_host = 19;
       }
-      
+
       if (sd_journal_get_data (log->priv->journal, "SYSLOG_IDENTIFIER", &data_comm, &len_comm) < 0) {
         if (sd_journal_get_data (log->priv->journal, "_COMM", &data_comm, &len_comm) < 0) {
           data_comm = "_COMM=unknown";
@@ -338,21 +350,21 @@ do_read_new_lines (GTask        *task,
       }
 
       /* +10 for _HOSTNAME=, +18 for SYSLOG_IDENTIFIER= or +6 for _COMM=, +5 for _PID=, +8 for MESSAGE= */
-      const char *host_val = (const char *)data_host + 10;
-      int host_len = len_host - 10;
-      
-      const char *comm_str = (const char *)data_comm;
-      int comm_prefix_len = 0;
+      host_val = (const char *)data_host + 10;
+      host_len = len_host - 10;
+
+      comm_str = (const char *)data_comm;
+      comm_prefix_len = 0;
       if (g_str_has_prefix (comm_str, "SYSLOG_IDENTIFIER=")) comm_prefix_len = 18;
       else if (g_str_has_prefix (comm_str, "_COMM=")) comm_prefix_len = 6;
-      const char *comm_val = comm_str + comm_prefix_len;
-      int comm_len = len_comm - comm_prefix_len;
+      comm_val = comm_str + comm_prefix_len;
+      comm_len = len_comm - comm_prefix_len;
 
-      const char *pid_val = (const char *)data_pid + 5;
-      int pid_len = len_pid - 5;
+      pid_val = (const char *)data_pid + 5;
+      pid_len = len_pid - 5;
 
-      const char *msg_val = (const char *)data_msg + 8;
-      int msg_len = len_msg - 8;
+      msg_val = (const char *)data_msg + 8;
+      msg_len = len_msg - 8;
 
       line = g_strdup_printf ("%s %.*s %.*s[%.*s]: %.*s",
                               date_str,
@@ -987,10 +999,13 @@ logview_log_create_systemd_journal (LogviewCreateCallback callback,
 
   r = sd_journal_open (&log->priv->journal, SD_JOURNAL_LOCAL_ONLY);
   if (r < 0) {
+    GError *error;
+
+    error = g_error_new (LOGVIEW_ERROR_QUARK, LOGVIEW_ERROR_FAILED,
+                         _("Failed to open systemd journal: %s"), strerror (-r));
     g_object_unref (log);
-    callback (NULL, g_error_new (LOGVIEW_ERROR_QUARK, LOGVIEW_ERROR_FAILED,
-                                 _("Failed to open systemd journal: %s"), strerror (-r)),
-              user_data);
+    callback (NULL, error, user_data);
+    g_error_free (error);
     return;
   }
 
@@ -999,12 +1014,15 @@ logview_log_create_systemd_journal (LogviewCreateCallback callback,
     r = sd_journal_previous_skip (log->priv->journal, 200);
 
   if (r < 0) {
+    GError *error;
+
+    error = g_error_new (LOGVIEW_ERROR_QUARK, LOGVIEW_ERROR_FAILED,
+                         _("Failed to initialize systemd journal: %s"), strerror (-r));
     sd_journal_close (log->priv->journal);
     log->priv->journal = NULL;
     g_object_unref (log);
-    callback (NULL, g_error_new (LOGVIEW_ERROR_QUARK, LOGVIEW_ERROR_FAILED,
-                                 _("Failed to initialize systemd journal: %s"), strerror (-r)),
-              user_data);
+    callback (NULL, error, user_data);
+    g_error_free (error);
     return;
   }
 
@@ -1097,4 +1115,3 @@ logview_log_get_has_days (LogviewLog *log)
 
   return log->priv->has_days;
 }
-

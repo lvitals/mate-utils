@@ -283,7 +283,7 @@ logview_manager_add_systemd_journal (LogviewManager *manager)
 
   data = g_slice_new0 (CreateCBData);
   data->manager = manager;
-  data->set_active = (manager->priv->logs == NULL);
+  data->set_active = (g_hash_table_size (manager->priv->logs) == 0);
   data->is_multiple = FALSE;
   data->file = NULL;
 
