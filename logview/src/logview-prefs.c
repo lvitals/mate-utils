@@ -147,20 +147,28 @@ load_filters (LogviewPrefs *prefs)
   gchar **filters;
   gchar **tokens;
   const gchar *str;
+  const gchar **filters_to_load;
   LogviewFilter *filter;
   GtkTextTag *tag;
   GdkRGBA color;
   gint idx;
+  static const gchar *default_filters[] = {
+    "Critical:0:#EF2929::(?i)(emergency|alert|critical|crit|fatal)",
+    "Errors:0:#CC0000::(?i)(error|failed|failure)",
+    "Warnings:0:#F57900::(?i)(warning|warn|deprecated)",
+    NULL
+  };
 
   filters = g_settings_get_strv (prefs->priv->logview_prefs,
                                  PREF_FILTERS);
+  filters_to_load = (filters[0] != NULL) ? (const gchar **) filters : default_filters;
 
   prefs->priv->filters = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                 g_free,
                                                 g_object_unref);
 
-  for (idx = 0; filters[idx] != NULL; idx++) {
-    str = filters[idx];
+  for (idx = 0; filters_to_load[idx] != NULL; idx++) {
+    str = filters_to_load[idx];
     tokens = g_strsplit (str, DELIMITER, MAX_TOKENS);
     filter = logview_filter_new (tokens[FILTER_NAME], tokens[FILTER_REGEX]);
     tag = gtk_text_tag_new (tokens[FILTER_NAME]);
@@ -537,4 +545,3 @@ logview_prefs_get_filter (LogviewPrefs *prefs,
 
   return g_hash_table_lookup (prefs->priv->filters, name);
 }
-

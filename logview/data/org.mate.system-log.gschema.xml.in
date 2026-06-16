@@ -26,7 +26,7 @@
       <description>Specifies a list of log files to open up at startup. A default list is created by reading /etc/syslog.conf.</description>
     </key>
     <key name="filters" type="as">
-      <default>[]</default>
+      <default>['Critical:0:#EF2929::(?i)(emergency|alert|critical|crit|fatal)', 'Errors:0:#CC0000::(?i)(error|failed|failure)', 'Warnings:0:#F57900::(?i)(warning|warn|deprecated)']</default>
       <summary>List of saved filters</summary>
       <description>List of saved regexp filters</description>
     </key>
