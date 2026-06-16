@@ -54,6 +54,7 @@ struct _LogviewWindowPrivate {
   GtkWidget *version_selector;
   GtkWidget *hpaned;
   GtkWidget *text_view;
+  GtkWidget *text_scrolled_window;
   GtkWidget *statusbar;
 
   GtkWidget *message_area;
@@ -71,6 +72,7 @@ struct _LogviewWindowPrivate {
   guint search_timeout_id;
 
   GCancellable *read_cancellable;
+  gboolean journal_page_loading;
 
   GList *active_filters;
   gboolean matches_only;
@@ -954,13 +956,77 @@ real_select_day (LogviewWindow *logview,
 }
 
 static void
+real_select_journal_day (LogviewWindow *logview,
+                         GDate         *date)
+{
+  GtkTextBuffer *buffer;
+  GtkTextIter start_iter, end_iter, line_start, line_end;
+  GdkRectangle visible_rect;
+  gchar date_prefix[64];
+  gint line_count, i;
+  gint first_line = -1, last_line = -1;
+
+  buffer = gtk_text_view_get_buffer (GTK_TEXT_VIEW (logview->priv->text_view));
+  gtk_text_buffer_get_bounds (buffer, &start_iter, &end_iter);
+
+  g_date_strftime (date_prefix, sizeof (date_prefix), "%b %e ", date);
+  line_count = gtk_text_buffer_get_line_count (buffer);
+
+  for (i = 0; i < line_count; i++) {
+    gchar *text;
+    gboolean matches;
+
+    gtk_text_buffer_get_iter_at_line (buffer, &line_start, i);
+    line_end = line_start;
+    gtk_text_iter_forward_line (&line_end);
+    text = gtk_text_buffer_get_text (buffer, &line_start, &line_end, FALSE);
+
+    matches = g_str_has_prefix (text, date_prefix);
+    g_free (text);
+
+    if (matches) {
+      if (first_line < 0)
+        first_line = i;
+      last_line = i;
+    }
+  }
+
+  gtk_text_buffer_remove_tag_by_name (buffer, "invisible",
+                                      &start_iter, &end_iter);
+
+  if (first_line < 0)
+    return;
+
+  gtk_text_buffer_get_iter_at_line (buffer, &line_start, first_line);
+  gtk_text_buffer_get_iter_at_line (buffer, &line_end, last_line + 1);
+
+  gtk_text_buffer_apply_tag_by_name (buffer, "invisible",
+                                     &start_iter, &line_start);
+  gtk_text_buffer_apply_tag_by_name (buffer, "invisible",
+                                     &line_end, &end_iter);
+
+  gtk_text_view_get_visible_rect (GTK_TEXT_VIEW (logview->priv->text_view),
+                                  &visible_rect);
+  gdk_window_invalidate_rect (gtk_widget_get_window (logview->priv->text_view),
+                              &visible_rect, TRUE);
+}
+
+static void
 loglist_day_selected_cb (LogviewLoglist *loglist,
                          Day *day,
                          gpointer user_data)
 {
   LogviewWindow *logview = user_data;
+  LogviewLog *active;
 
-  real_select_day (logview, day->date, day->first_line, day->last_line);
+  active = logview_manager_get_active_log (logview->priv->manager);
+  if (active && logview_log_is_systemd_journal (active))
+    real_select_journal_day (logview, day->date);
+  else
+    real_select_day (logview, day->date, day->first_line, day->last_line);
+
+  if (active)
+    g_object_unref (active);
 }
 
 static void
@@ -1006,6 +1072,39 @@ log_monitor_changed_cb (LogviewLog *log,
 }
 
 static void
+log_view_vadjustment_changed_cb (GtkAdjustment *adjustment,
+                                 gpointer       user_data)
+{
+  LogviewWindow *window = user_data;
+  LogviewLog *active;
+  gdouble value;
+  gdouble upper;
+  gdouble page_size;
+
+  active = logview_manager_get_active_log (window->priv->manager);
+  if (!active)
+    return;
+
+  if (!logview_log_is_systemd_journal (active) ||
+      !logview_log_has_more_lines (active) ||
+      window->priv->journal_page_loading) {
+    g_object_unref (active);
+    return;
+  }
+
+  value = gtk_adjustment_get_value (adjustment);
+  upper = gtk_adjustment_get_upper (adjustment);
+  page_size = gtk_adjustment_get_page_size (adjustment);
+
+  if (value + page_size >= upper - (page_size * 0.5)) {
+    window->priv->journal_page_loading = TRUE;
+    logview_window_schedule_log_read (window, active);
+  }
+
+  g_object_unref (active);
+}
+
+static void
 paint_timestamps (GtkTextBuffer *buffer, int old_line_count,
                   GSList *days)
 {
@@ -1036,6 +1135,9 @@ read_new_lines_cb (LogviewLog *log,
   GtkTextMark *mark;
   char *converted, *primary;
   gsize len;
+
+  if (logview_log_is_systemd_journal (log))
+    window->priv->journal_page_loading = FALSE;
 
   if (error != NULL) {
     if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
@@ -1116,6 +1218,8 @@ active_log_changed_cb (LogviewManager *manager,
 
   findbar_close_cb (LOGVIEW_FINDBAR (window->priv->find_bar),
                     window);
+
+  window->priv->journal_page_loading = FALSE;
 
   logview_set_window_title (window, logview_log_get_display_name (log));
 
@@ -1417,6 +1521,7 @@ logview_window_init (LogviewWindow *logview)
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (w),
                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
   gtk_scrolled_window_set_shadow_type (GTK_SCROLLED_WINDOW (w), GTK_SHADOW_IN);
+  priv->text_scrolled_window = w;
   gtk_box_pack_start (GTK_BOX (main_view), w, TRUE, TRUE, 0);
   gtk_widget_show (w);
 
@@ -1429,6 +1534,11 @@ logview_window_init (LogviewWindow *logview)
 
   gtk_container_add (GTK_CONTAINER (w), priv->text_view);
   gtk_widget_show (priv->text_view);
+
+  g_signal_connect (gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (priv->text_scrolled_window)),
+                    "value-changed",
+                    G_CALLBACK (log_view_vadjustment_changed_cb),
+                    logview);
 
   /* use the desktop monospace font */
   monospace_font_name = logview_prefs_get_monospace_font_name (priv->prefs);
