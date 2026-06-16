@@ -71,6 +71,9 @@ void            logview_manager_add_logs_from_name_list (LogviewManager *manager
 void            logview_manager_add_log_from_gfile  (LogviewManager *manager,
                                                      GFile *file,
                                                      gboolean set_active);
+#ifdef HAVE_SYSTEMD
+void            logview_manager_add_systemd_journal (LogviewManager *manager);
+#endif
 void            logview_manager_add_logs_from_names (LogviewManager *manager,
                                                      char ** names,
                                                      const gchar *active);

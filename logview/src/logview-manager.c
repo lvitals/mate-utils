@@ -244,6 +244,53 @@ add_log_from_gfile_internal (LogviewManager *manager,
   g_free (file_uri);
 }
 
+#ifdef HAVE_SYSTEMD
+static void
+create_journal_cb (LogviewLog *log, GError *error, gpointer user_data)
+{
+  CreateCBData *data = user_data;
+
+  if (log) {
+    char *log_uri = g_strdup ("systemd-journal://");
+
+    /* creation went well, store the log and notify */
+    g_hash_table_insert (data->manager->priv->logs,
+                         log_uri, log);
+
+    g_signal_emit (data->manager, signals[LOG_ADDED], 0, log, NULL);
+
+    if (data->set_active) {
+      logview_manager_set_active_log (data->manager, log);
+    }
+  } else {
+    logview_app_add_error (logview_app_get (),
+                           _("Systemd Journal"), error->message);
+  }
+
+  g_slice_free (CreateCBData, data);
+}
+
+void
+logview_manager_add_systemd_journal (LogviewManager *manager)
+{
+  CreateCBData *data;
+
+  g_assert (LOGVIEW_IS_MANAGER (manager));
+
+  if (g_hash_table_lookup (manager->priv->logs, "systemd-journal://") != NULL) {
+    return;
+  }
+
+  data = g_slice_new0 (CreateCBData);
+  data->manager = manager;
+  data->set_active = (manager->priv->logs == NULL);
+  data->is_multiple = FALSE;
+  data->file = NULL;
+
+  logview_log_create_systemd_journal (create_journal_cb, data);
+}
+#endif
+
 static void
 logview_manager_add_log_from_name (LogviewManager *manager,
                                    const char *filename, gboolean set_active,

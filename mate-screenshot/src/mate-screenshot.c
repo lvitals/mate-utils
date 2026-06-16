@@ -23,7 +23,9 @@
 #include <config.h>
 #endif
 
+#ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
+#endif
 #include <gdk/gdkkeysyms.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -799,7 +801,8 @@ play_sound_effect (GdkWindow *window)
   if (res < 0)
     goto done;
 
-  if (window != NULL)
+#ifdef GDK_WINDOWING_X11
+  if (window != NULL && GDK_IS_X11_WINDOW (window))
     {
       res = ca_proplist_setf (p,
                               CA_PROP_WINDOW_X11_XID,
@@ -808,6 +811,7 @@ play_sound_effect (GdkWindow *window)
       if (res < 0)
         goto done;
     }
+#endif
 
   ca_context_play_full (c, 0, p, NULL, NULL);
 

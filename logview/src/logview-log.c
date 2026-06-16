@@ -31,6 +31,10 @@
 #include <zlib.h>
 #endif
 
+#ifdef HAVE_SYSTEMD
+#include <systemd/sd-journal.h>
+#endif
+
 #include "logview-log.h"
 #include "logview-utils.h"
 
@@ -45,6 +49,11 @@ struct _LogviewLogPrivate {
   /* file and monitor */
   GFile *file;
   GFileMonitor *mon;
+
+#ifdef HAVE_SYSTEMD
+  sd_journal *journal;
+  guint journal_watch_id;
+#endif
 
   /* stats about the file */
   time_t file_time;
@@ -108,6 +117,18 @@ do_finalize (GObject *obj)
     g_object_unref (log->priv->mon);
     log->priv->mon = NULL;
   }
+
+#ifdef HAVE_SYSTEMD
+  if (log->priv->journal_watch_id) {
+    g_source_remove (log->priv->journal_watch_id);
+    log->priv->journal_watch_id = 0;
+  }
+
+  if (log->priv->journal) {
+    sd_journal_close (log->priv->journal);
+    log->priv->journal = NULL;
+  }
+#endif
 
   if (log->priv->days) {
     g_slist_free_full (log->priv->days,
@@ -272,7 +293,6 @@ do_read_new_lines (GTask        *task,
   GPtrArray *lines;
 
   g_assert (LOGVIEW_IS_LOG (log));
-  g_assert (log->priv->stream != NULL);
 
   if (!log->priv->lines) {
     log->priv->lines = g_ptr_array_new ();
@@ -284,10 +304,74 @@ do_read_new_lines (GTask        *task,
   /* remove the NULL-terminator */
   g_ptr_array_remove_index (lines, lines->len - 1);
 
-  while ((line = g_data_input_stream_read_line (log->priv->stream, NULL,
-                                                cancellable, &err)) != NULL)
+#ifdef HAVE_SYSTEMD
+  if (log->priv->journal) {
+    int r;
+    uint64_t usec;
+    const void *data_msg, *data_host, *data_comm, *data_pid;
+    size_t len_msg, len_host, len_comm, len_pid;
+
+    while ((r = sd_journal_next (log->priv->journal)) > 0) {
+      r = sd_journal_get_data (log->priv->journal, "MESSAGE", &data_msg, &len_msg);
+      if (r < 0) continue;
+
+      sd_journal_get_realtime_usec (log->priv->journal, &usec);
+      GDateTime *dt = g_date_time_new_from_unix_local (usec / 1000000);
+      gchar *date_str = g_date_time_format (dt, "%b %e %H:%M:%S");
+      g_date_time_unref (dt);
+
+      if (sd_journal_get_data (log->priv->journal, "_HOSTNAME", &data_host, &len_host) < 0) {
+        data_host = "_HOSTNAME=localhost";
+        len_host = 19;
+      }
+      
+      if (sd_journal_get_data (log->priv->journal, "SYSLOG_IDENTIFIER", &data_comm, &len_comm) < 0) {
+        if (sd_journal_get_data (log->priv->journal, "_COMM", &data_comm, &len_comm) < 0) {
+          data_comm = "_COMM=unknown";
+          len_comm = 13;
+        }
+      }
+
+      if (sd_journal_get_data (log->priv->journal, "_PID", &data_pid, &len_pid) < 0) {
+        data_pid = "_PID=0";
+        len_pid = 6;
+      }
+
+      /* +10 for _HOSTNAME=, +18 for SYSLOG_IDENTIFIER= or +6 for _COMM=, +5 for _PID=, +8 for MESSAGE= */
+      const char *host_val = (const char *)data_host + 10;
+      int host_len = len_host - 10;
+      
+      const char *comm_str = (const char *)data_comm;
+      int comm_prefix_len = 0;
+      if (g_str_has_prefix (comm_str, "SYSLOG_IDENTIFIER=")) comm_prefix_len = 18;
+      else if (g_str_has_prefix (comm_str, "_COMM=")) comm_prefix_len = 6;
+      const char *comm_val = comm_str + comm_prefix_len;
+      int comm_len = len_comm - comm_prefix_len;
+
+      const char *pid_val = (const char *)data_pid + 5;
+      int pid_len = len_pid - 5;
+
+      const char *msg_val = (const char *)data_msg + 8;
+      int msg_len = len_msg - 8;
+
+      line = g_strdup_printf ("%s %.*s %.*s[%.*s]: %.*s",
+                              date_str,
+                              host_len, host_val,
+                              comm_len, comm_val,
+                              pid_len, pid_val,
+                              msg_len, msg_val);
+      g_ptr_array_add (lines, (gpointer) line);
+      g_free (date_str);
+    }
+  } else
+#endif
   {
-    g_ptr_array_add (lines, (gpointer) line);
+    g_assert (log->priv->stream != NULL);
+    while ((line = g_data_input_stream_read_line (log->priv->stream, NULL,
+                                                  cancellable, &err)) != NULL)
+    {
+      g_ptr_array_add (lines, (gpointer) line);
+    }
   }
 
   /* NULL-terminate the array again */
@@ -309,6 +393,44 @@ do_read_new_lines (GTask        *task,
   g_task_return_boolean (task, TRUE);
 }
 
+#ifdef HAVE_SYSTEMD
+static gboolean
+journal_callback (GIOChannel *source, GIOCondition condition, gpointer data)
+{
+  LogviewLog *log = data;
+
+  if (condition & (G_IO_HUP | G_IO_ERR | G_IO_NVAL))
+    {
+      log->priv->journal_watch_id = 0;
+      return FALSE;
+    }
+
+  sd_journal_process (log->priv->journal);
+  log->priv->has_new_lines = TRUE;
+  g_signal_emit (log, signals[LOG_CHANGED], 0);
+
+  return TRUE;
+}
+
+static void
+setup_journal_monitor (LogviewLog *log)
+{
+  int fd, events;
+  GIOChannel *channel;
+
+  fd = sd_journal_get_fd (log->priv->journal);
+  if (fd < 0) {
+    return;
+  }
+
+  events = sd_journal_get_events (log->priv->journal);
+
+  channel = g_io_channel_unix_new (fd);
+  log->priv->journal_watch_id = g_io_add_watch (channel, events, journal_callback, log);
+  g_io_channel_unref (channel);
+}
+#endif
+
 static void
 log_load_done (GObject      *source_object,
                GAsyncResult *res,
@@ -325,7 +447,14 @@ log_load_done (GObject      *source_object,
     job->callback (NULL, error, job->user_data);
   } else {
     job->callback (job->log, NULL, job->user_data);
-    setup_file_monitor (job->log);
+#ifdef HAVE_SYSTEMD
+    if (job->log->priv->journal) {
+      setup_journal_monitor (job->log);
+    } else
+#endif
+    {
+      setup_file_monitor (job->log);
+    }
   }
 
   g_slice_free (LoadJob, job);
@@ -608,6 +737,15 @@ log_load (GTask        *task,
   GError *err = NULL;
   gboolean is_archive, can_read;
 
+#ifdef HAVE_SYSTEMD
+  if (log->priv->journal) {
+    log->priv->display_name = g_strdup (_("Systemd Journal"));
+    log->priv->file_time = time (NULL);
+    g_task_return_boolean (task, TRUE);
+    return;
+  }
+#endif
+
   info = g_file_query_info (f,
                             G_FILE_ATTRIBUTE_ACCESS_CAN_READ ","
                             G_FILE_ATTRIBUTE_STANDARD_CONTENT_TYPE ","
@@ -838,6 +976,41 @@ logview_log_create_from_gfile (GFile *file, LogviewCreateCallback callback,
 
   log_setup_load (log, callback, user_data);
 }
+
+#ifdef HAVE_SYSTEMD
+void
+logview_log_create_systemd_journal (LogviewCreateCallback callback,
+                                    gpointer user_data)
+{
+  LogviewLog *log = g_object_new (LOGVIEW_TYPE_LOG, NULL);
+  int r;
+
+  r = sd_journal_open (&log->priv->journal, SD_JOURNAL_LOCAL_ONLY);
+  if (r < 0) {
+    g_object_unref (log);
+    callback (NULL, g_error_new (LOGVIEW_ERROR_QUARK, LOGVIEW_ERROR_FAILED,
+                                 _("Failed to open systemd journal: %s"), strerror (-r)),
+              user_data);
+    return;
+  }
+
+  r = sd_journal_seek_tail (log->priv->journal);
+  if (r >= 0)
+    r = sd_journal_previous_skip (log->priv->journal, 200);
+
+  if (r < 0) {
+    sd_journal_close (log->priv->journal);
+    log->priv->journal = NULL;
+    g_object_unref (log);
+    callback (NULL, g_error_new (LOGVIEW_ERROR_QUARK, LOGVIEW_ERROR_FAILED,
+                                 _("Failed to initialize systemd journal: %s"), strerror (-r)),
+              user_data);
+    return;
+  }
+
+  log_setup_load (log, callback, user_data);
+}
+#endif
 
 const char *
 logview_log_get_display_name (LogviewLog *log)

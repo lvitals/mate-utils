@@ -369,6 +369,43 @@ AS_IF([test "x$enable_zlib" != "xno"],
 
 AC_SUBST(Z_LIBS)
 
+dnl systemd journal support
+AC_ARG_ENABLE([systemd],
+              [AS_HELP_STRING([--enable-systemd=@<:@yes/no/auto@:>@],
+                              [Enable systemd journal support in logview])],
+              [enable_systemd=$enableval],
+              [enable_systemd=auto])
+
+AS_IF([test "x$enable_systemd" != "xno"],
+      [
+        PKG_CHECK_MODULES([SYSTEMD], [libsystemd >= 234],
+                          [have_systemd=yes],
+                          [
+                            have_systemd=no
+                            AS_IF([test "x$enable_systemd" = "xyes"],
+                                  [AC_MSG_ERROR([systemd support requested but libsystemd was not found])])
+                          ])
+      ],
+      [have_systemd=no])
+
+AS_IF([test "x$have_systemd" = "xyes"],
+      [
+        AC_DEFINE([HAVE_SYSTEMD], [1], [Define to 1 if we have systemd journal support])
+      ])
+AM_CONDITIONAL([HAVE_SYSTEMD], [test "x$have_systemd" = "xyes"])
+
+dnl Wayland support for mate-screenshot
+PKG_CHECK_MODULES([SCREENSHOT_WAYLAND], [gdk-wayland-3.0],
+                  [have_gdk_wayland=yes],
+                  [have_gdk_wayland=no])
+
+AS_IF([test "x$have_gdk_wayland" = "xyes"],
+      [
+        AC_DEFINE([MATE_SCREENSHOT_ENABLE_WAYLAND], [1], [Define to 1 if we have Wayland support for mate-screenshot])
+        AC_SUBST(SCREENSHOT_WAYLAND_CFLAGS)
+        AC_SUBST(SCREENSHOT_WAYLAND_LIBS)
+      ])
+
 dnl Internationalization
 AM_GNU_GETTEXT([external])
 AM_GNU_GETTEXT_VERSION([0.19.8])

@@ -88,6 +88,10 @@ void          logview_log_create                   (const char *filename,
 void          logview_log_create_from_gfile        (GFile *file,
                                                     LogviewCreateCallback callback,
                                                     gpointer user_data);
+#ifdef HAVE_SYSTEMD
+void          logview_log_create_systemd_journal   (LogviewCreateCallback callback,
+                                                    gpointer user_data);
+#endif
 void          logview_log_read_new_lines           (LogviewLog *log,
                                                     GCancellable *cancellable,
                                                     LogviewNewLinesCallback callback,

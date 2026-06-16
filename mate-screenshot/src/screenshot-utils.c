@@ -24,8 +24,13 @@
 
 #include "screenshot-utils.h"
 
+#ifdef GDK_WINDOWING_X11
 #include <X11/Xatom.h>
 #include <gdk/gdkx.h>
+#endif
+#ifdef MATE_SCREENSHOT_ENABLE_WAYLAND
+#include <gdk/gdkwayland.h>
+#endif
 #include <gdk/gdkkeysyms.h>
 #include <gtk/gtk.h>
 #include <glib.h>
@@ -39,6 +44,17 @@ static GtkWidget *selection_window;
 
 #define SELECTION_NAME "_MATE_PANEL_SCREENSHOT"
 
+static gboolean
+is_wayland (void)
+{
+#ifdef MATE_SCREENSHOT_ENABLE_WAYLAND
+  GdkDisplay *display = gdk_display_get_default ();
+  return GDK_IS_WAYLAND_DISPLAY (display);
+#else
+  return FALSE;
+#endif
+}
+
 /* To make sure there is only one screenshot taken at a time,
  * (Imagine key repeat for the print screen key) we hold a selection
  * until we are done taking the screenshot
@@ -50,6 +66,10 @@ screenshot_grab_lock (void)
   gboolean result = FALSE;
   GdkDisplay *display;
 
+  if (is_wayland ())
+    return TRUE;
+
+#ifdef GDK_WINDOWING_X11
   selection_atom = gdk_atom_intern (SELECTION_NAME, FALSE);
   gdk_x11_grab_server ();
 
@@ -75,6 +95,7 @@ screenshot_grab_lock (void)
 
   display = gdk_display_get_default ();
   gdk_display_flush (display);
+#endif
 
   return result;
 }
@@ -84,6 +105,10 @@ screenshot_release_lock (void)
 {
   GdkDisplay *display;
 
+  if (is_wayland ())
+    return;
+
+#ifdef GDK_WINDOWING_X11
   if (selection_window)
     {
       gtk_widget_destroy (selection_window);
@@ -92,12 +117,18 @@ screenshot_release_lock (void)
 
   display = gdk_display_get_default ();
   gdk_display_flush (display);
+#endif
 }
 
 static GdkWindow *
 screen_get_active_window (GdkScreen *screen)
 {
   GdkWindow *ret = NULL;
+
+  if (is_wayland ())
+    return NULL;
+
+#ifdef GDK_WINDOWING_X11
   Atom type_return;
   gint format_return;
   gulong nitems_return;
@@ -132,6 +163,7 @@ screen_get_active_window (GdkScreen *screen)
 
   if (data)
     XFree (data);
+#endif
 
   return ret;
 }
@@ -141,6 +173,9 @@ screenshot_find_active_window (void)
 {
   GdkWindow *window;
   GdkScreen *default_screen;
+
+  if (is_wayland ())
+    return NULL;
 
   default_screen = gdk_screen_get_default ();
   window = screen_get_active_window (default_screen);
@@ -153,6 +188,9 @@ screenshot_window_is_desktop (GdkWindow *window)
 {
   GdkWindow *root_window = gdk_get_default_root_window ();
   GdkWindowTypeHint window_type_hint;
+
+  if (is_wayland ())
+    return FALSE;
 
   if (window == root_window)
     return TRUE;
@@ -173,8 +211,11 @@ screenshot_find_current_window ()
   GdkSeat *seat;
   GdkDevice *device;
 
+  if (is_wayland ())
+    return NULL;
+
   current_window = screenshot_find_active_window ();
-  display = gdk_window_get_display (current_window);
+  display = gdk_display_get_default ();
   seat = gdk_display_get_default_seat (display);
   device = gdk_seat_get_pointer (seat);
 
@@ -189,7 +230,7 @@ screenshot_find_current_window ()
       if (screenshot_window_is_desktop (current_window))
 	/* if the current window is the desktop (e.g. caja), we
 	 * return NULL, as getting the whole screen makes more sense.
-         */
+	 */
         return NULL;
 
       /* Once we have a window, we take the toplevel ancestor. */
@@ -393,6 +434,13 @@ screenshot_select_area_async (SelectAreaCallback callback)
   select_area_filter_data  data;
   CallbackData *cb_data;
 
+  if (is_wayland ())
+    {
+      GdkRectangle rect = { 0, 0, 0, 0 };
+      callback (&rect);
+      return;
+    }
+
   data.rect.x = 0;
   data.rect.y = 0;
   data.rect.width  = 0;
@@ -571,6 +619,7 @@ blank_region_in_pixbuf (GdkPixbuf *pixbuf, cairo_region_t *region)
 static void
 mask_monitors (GdkPixbuf *pixbuf, GdkWindow *root_window)
 {
+#ifdef GDK_WINDOWING_X11
   GdkScreen *screen;
   cairo_region_t *region_with_monitors;
   cairo_region_t *invisible_region;
@@ -594,7 +643,178 @@ mask_monitors (GdkPixbuf *pixbuf, GdkWindow *root_window)
 
   cairo_region_destroy (region_with_monitors);
   cairo_region_destroy (invisible_region);
+#endif
 }
+
+#ifdef MATE_SCREENSHOT_ENABLE_WAYLAND
+typedef struct {
+  GMainLoop *loop;
+  gchar *uri;
+  gboolean timeout;
+} PortalContext;
+
+static void
+on_portal_response (GDBusConnection *conn,
+                    const gchar     *sender,
+                    const gchar     *obj_path,
+                    const gchar     *iface,
+                    const gchar     *signal,
+                    GVariant        *params,
+                    gpointer         data)
+{
+  guint32 response;
+  GVariant *results;
+  const gchar *uri_val = NULL;
+  PortalContext *context = data;
+
+  g_variant_get (params, "(u@a{sv})", &response, &results);
+  if (response == 0)
+    {
+      if (g_variant_lookup (results, "uri", "&s", &uri_val))
+        {
+          context->uri = g_strdup (uri_val);
+        }
+    }
+  g_variant_unref (results);
+  g_main_loop_quit (context->loop);
+}
+
+static gboolean
+on_portal_timeout (gpointer data)
+{
+  PortalContext *context = data;
+  context->timeout = TRUE;
+  g_main_loop_quit (context->loop);
+  return G_SOURCE_REMOVE;
+}
+
+static GdkPixbuf *
+screenshot_get_pixbuf_portal (gboolean interactive)
+{
+  GDBusConnection *connection;
+  GError *error = NULL;
+  GVariant *ret;
+  const gchar *handle;
+  GdkPixbuf *pixbuf = NULL;
+  PortalContext context;
+  gchar *handle_token;
+  gchar *sender;
+  gchar *request_path;
+  guint timeout_id;
+
+  connection = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
+  if (!connection)
+    {
+      g_warning ("Error connecting to D-Bus: %s", error->message);
+      g_error_free (error);
+      return NULL;
+    }
+
+  sender = g_strdup (g_dbus_connection_get_unique_name (connection));
+  for (int i = 0; sender[i]; i++)
+    if (sender[i] == '.') sender[i] = '_';
+  if (sender[0] == ':') sender[0] = '_';
+
+  handle_token = g_strdup_printf ("mate_screenshot_%u", g_random_int ());
+  request_path = g_strdup_printf ("/org/freedesktop/portal/desktop/request/%s/%s", sender, handle_token);
+
+  context.loop = g_main_loop_new (NULL, FALSE);
+  context.uri = NULL;
+  context.timeout = FALSE;
+
+  guint sub_id = g_dbus_connection_signal_subscribe (connection,
+                                                     "org.freedesktop.portal.Desktop",
+                                                     "org.freedesktop.portal.Request",
+                                                     "Response",
+                                                     request_path,
+                                                     NULL,
+                                                     G_DBUS_SIGNAL_FLAGS_NONE,
+                                                     on_portal_response,
+                                                     &context,
+                                                     NULL);
+
+  GVariantBuilder options_builder;
+  g_variant_builder_init (&options_builder, G_VARIANT_TYPE_VARDICT);
+  g_variant_builder_add (&options_builder, "{sv}", "handle_token", g_variant_new_string (handle_token));
+  g_variant_builder_add (&options_builder, "{sv}", "interactive", g_variant_new_boolean (interactive));
+
+  ret = g_dbus_connection_call_sync (connection,
+                                     "org.freedesktop.portal.Desktop",
+                                     "/org/freedesktop/portal/desktop",
+                                     "org.freedesktop.portal.Screenshot",
+                                     "Screenshot",
+                                     g_variant_new ("(s@a{sv})", "", g_variant_builder_end (&options_builder)),
+                                     G_VARIANT_TYPE ("(o)"),
+                                     G_DBUS_CALL_FLAGS_NONE,
+                                     -1,
+                                     NULL,
+                                     &error);
+
+  if (!ret)
+    {
+      g_warning ("Error calling Screenshot portal: %s", error->message);
+      g_clear_error (&error);
+      g_dbus_connection_signal_unsubscribe (connection, sub_id);
+      g_main_loop_unref (context.loop);
+      g_object_unref (connection);
+      g_free (handle_token);
+      g_free (sender);
+      g_free (request_path);
+      return NULL;
+    }
+
+  g_variant_get (ret, "(&o)", &handle);
+  if (g_strcmp0 (handle, request_path) != 0)
+    {
+      g_warning ("Portal returned unexpected handle: %s (expected %s)", handle, request_path);
+    }
+
+  timeout_id = g_timeout_add_seconds (60, on_portal_timeout, &context);
+  g_main_loop_run (context.loop);
+
+  if (!context.timeout)
+    g_source_remove (timeout_id);
+
+  g_dbus_connection_signal_unsubscribe (connection, sub_id);
+
+  if (context.timeout)
+    {
+      g_warning ("Portal interaction timed out");
+    }
+  else if (context.uri)
+    {
+      GFile *file = g_file_new_for_uri (context.uri);
+      g_clear_error (&error);
+      GInputStream *stream = G_INPUT_STREAM (g_file_read (file, NULL, &error));
+      if (stream)
+        {
+          pixbuf = gdk_pixbuf_new_from_stream (stream, NULL, &error);
+          if (error)
+            {
+              g_warning ("Error loading screenshot from portal: %s", error->message);
+              g_clear_error (&error);
+            }
+          g_object_unref (stream);
+        }
+      else
+        {
+          g_warning ("Error opening screenshot file: %s", error->message);
+          g_clear_error (&error);
+        }
+      g_object_unref (file);
+      g_free (context.uri);
+    }
+
+  g_main_loop_unref (context.loop);
+  g_variant_unref (ret);
+  g_object_unref (connection);
+  g_free (handle_token);
+  g_free (sender);
+  g_free (request_path);
+
+  return pixbuf;
+}
+#endif
 
 GdkPixbuf *
 screenshot_get_pixbuf (GdkWindow    *window,
@@ -610,6 +830,18 @@ screenshot_get_pixbuf (GdkWindow    *window,
   gint screen_width, screen_height, scale;
   gint invis_x = 0, invis_y = 0;
 
+  #ifdef MATE_SCREENSHOT_ENABLE_WAYLAND
+  if (is_wayland ())
+    {
+      /* If include_mask is FALSE, it means the user wants to capture a specific window
+       * or area (not full screen). The basic portal doesn't support specific window capture
+       * directly without UI, so we fall back to the interactive portal. */
+      gboolean interactive = !include_mask;
+      return screenshot_get_pixbuf_portal (interactive);
+    }
+  #endif
+
+  #ifdef GDK_WINDOWING_X11
   /* If the screenshot should include the border, we look for the WM window. */
 
   Window client_xid = None;
@@ -898,6 +1130,9 @@ screenshot_get_pixbuf (GdkWindow    *window,
     }
 
   return screenshot;
+#else
+  return NULL;
+#endif
 }
 
 void

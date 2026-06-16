@@ -62,6 +62,7 @@ mate_system_log_CFLAGS =	\
 	$(GTHREAD_CFLAGS)	\
 	$(GIO_CFLAGS)		\
 	$(GTK_CFLAGS)		\
+	$(SYSTEMD_CFLAGS)	\
 	$(WARN_CFLAGS)		\
 	$(NULL)
 
@@ -70,6 +71,7 @@ mate_system_log_LDADD =		\
 	$(GIO_LIBS)		\
 	$(GTHREAD_LIBS)		\
 	$(GTK_LIBS)		\
+	$(SYSTEMD_LIBS)		\
 	$(Z_LIBS)		\
 	-lm
 

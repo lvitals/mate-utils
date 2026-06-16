@@ -27,6 +27,7 @@
 #include "logview-manager.h"
 #include "logview-window.h"
 #include "logview-prefs.h"
+#include "logview-log.h"
 
 #include <glib/gi18n.h>
 
@@ -253,6 +254,10 @@ logview_app_first_time_initialize (LogviewApp *app)
   /* let's add all accessible files in /var/log and those mentioned
    * in /etc/syslog.conf.
    */
+
+#ifdef HAVE_SYSTEMD
+  logview_manager_add_systemd_journal (app->priv->manager);
+#endif
 
   logs = parse_syslog ();
 
