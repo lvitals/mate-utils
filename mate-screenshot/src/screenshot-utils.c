@@ -412,6 +412,70 @@ typedef struct {
   SelectAreaCallback callback;
 } CallbackData;
 
+#ifdef MATE_SCREENSHOT_ENABLE_WAYLAND
+static gboolean
+screenshot_select_area_wayland (GdkRectangle *rectangle)
+{
+  GSubprocess *process;
+  GBytes *stdout_bytes = NULL;
+  GBytes *stderr_bytes = NULL;
+  GError *error = NULL;
+  const gchar *stdout_data;
+  gchar *geometry;
+  gsize stdout_size = 0;
+  gint matched;
+
+  process = g_subprocess_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                              G_SUBPROCESS_FLAGS_STDERR_PIPE,
+                              &error,
+                              "slurp",
+                              NULL);
+  if (!process)
+    {
+      g_warning ("Error launching slurp area selector: %s", error->message);
+      g_error_free (error);
+      return FALSE;
+    }
+
+  if (!g_subprocess_communicate (process, NULL, NULL,
+                                 &stdout_bytes, &stderr_bytes, &error))
+    {
+      g_warning ("Error reading slurp area selector output: %s", error->message);
+      g_error_free (error);
+      g_object_unref (process);
+      return FALSE;
+    }
+
+  if (!g_subprocess_get_successful (process))
+    {
+      if (stderr_bytes)
+        g_bytes_unref (stderr_bytes);
+      if (stdout_bytes)
+        g_bytes_unref (stdout_bytes);
+      g_object_unref (process);
+      return FALSE;
+    }
+
+  stdout_data = g_bytes_get_data (stdout_bytes, &stdout_size);
+  geometry = g_strndup (stdout_data, stdout_size);
+  matched = sscanf (geometry, "%d,%d %dx%d",
+                    &rectangle->x,
+                    &rectangle->y,
+                    &rectangle->width,
+                    &rectangle->height);
+  g_free (geometry);
+
+  if (stderr_bytes)
+    g_bytes_unref (stderr_bytes);
+  g_bytes_unref (stdout_bytes);
+  g_object_unref (process);
+
+  return matched == 4 &&
+         rectangle->width > 0 &&
+         rectangle->height > 0;
+}
+#endif
+
 static gboolean
 emit_select_callback_in_idle (gpointer user_data)
 {
@@ -437,6 +501,7 @@ screenshot_select_area_async (SelectAreaCallback callback)
   if (is_wayland ())
     {
       GdkRectangle rect = { 0, 0, 0, 0 };
+      screenshot_select_area_wayland (&rect);
       callback (&rect);
       return;
     }
@@ -494,6 +559,7 @@ out:
   g_timeout_add (200, emit_select_callback_in_idle, cb_data);
 }
 
+#ifdef GDK_WINDOWING_X11
 static Window
 find_wm_window (Window xid)
 {
@@ -516,6 +582,7 @@ find_wm_window (Window xid)
     }
   while (TRUE);
 }
+#endif
 
 static cairo_region_t *
 make_region_with_monitors (GdkScreen *screen)
@@ -653,6 +720,97 @@ typedef struct {
   gboolean timeout;
 } PortalContext;
 
+static GdkPixbuf *
+screenshot_get_pixbuf_grim (GdkRectangle *rectangle)
+{
+  GSubprocess *process;
+  GBytes *stdout_bytes = NULL;
+  GBytes *stderr_bytes = NULL;
+  GInputStream *stream;
+  GdkPixbuf *pixbuf = NULL;
+  GError *error = NULL;
+  gchar *geometry = NULL;
+  const gchar *argv_full[] = { "grim", "-", NULL };
+  const gchar *argv_area[] = { "grim", "-g", NULL, "-", NULL };
+  const gchar **argv;
+
+  if (rectangle)
+    {
+      geometry = g_strdup_printf ("%d,%d %dx%d",
+                                  rectangle->x,
+                                  rectangle->y,
+                                  rectangle->width,
+                                  rectangle->height);
+      argv_area[2] = geometry;
+      argv = argv_area;
+    }
+  else
+    {
+      argv = argv_full;
+    }
+
+  process = g_subprocess_newv (argv,
+                               G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                               G_SUBPROCESS_FLAGS_STDERR_PIPE,
+                               &error);
+  if (!process)
+    {
+      g_warning ("Error launching grim fallback: %s", error->message);
+      g_error_free (error);
+      g_free (geometry);
+      return NULL;
+    }
+
+  if (!g_subprocess_communicate (process, NULL, NULL,
+                                 &stdout_bytes, &stderr_bytes, &error))
+    {
+      g_warning ("Error reading grim fallback output: %s", error->message);
+      g_error_free (error);
+      g_object_unref (process);
+      g_free (geometry);
+      return NULL;
+    }
+
+  if (!g_subprocess_get_successful (process))
+    {
+      const gchar *stderr_data = NULL;
+      gsize stderr_size = 0;
+
+      if (stderr_bytes)
+        stderr_data = g_bytes_get_data (stderr_bytes, &stderr_size);
+
+      if (stderr_data && stderr_size > 0)
+        g_warning ("grim fallback failed: %.*s", (gint) stderr_size, stderr_data);
+      else
+        g_warning ("grim fallback failed");
+
+      if (stdout_bytes)
+        g_bytes_unref (stdout_bytes);
+      if (stderr_bytes)
+        g_bytes_unref (stderr_bytes);
+      g_object_unref (process);
+      g_free (geometry);
+      return NULL;
+    }
+
+  stream = g_memory_input_stream_new_from_bytes (stdout_bytes);
+  pixbuf = gdk_pixbuf_new_from_stream (stream, NULL, &error);
+  if (!pixbuf)
+    {
+      g_warning ("Error loading screenshot from grim fallback: %s", error->message);
+      g_error_free (error);
+    }
+
+  g_object_unref (stream);
+  g_bytes_unref (stdout_bytes);
+  if (stderr_bytes)
+    g_bytes_unref (stderr_bytes);
+  g_object_unref (process);
+  g_free (geometry);
+
+  return pixbuf;
+}
+
 static void
 on_portal_response (GDBusConnection *conn,
                     const gchar     *sender,
@@ -700,19 +858,24 @@ screenshot_get_pixbuf_portal (gboolean interactive)
   gchar *handle_token;
   gchar *sender;
   gchar *request_path;
+  guint sub_id;
   guint timeout_id;
+  GVariantBuilder options_builder;
+  gint i;
 
   connection = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
   if (!connection)
     {
-      g_warning ("Error connecting to D-Bus: %s", error->message);
+      if (interactive)
+        g_warning ("Error connecting to D-Bus: %s", error->message);
       g_error_free (error);
       return NULL;
     }
 
   sender = g_strdup (g_dbus_connection_get_unique_name (connection));
-  for (int i = 0; sender[i]; i++)
-    if (sender[i] == '.') sender[i] = '_';
+  for (i = 0; sender[i]; i++)
+    if (sender[i] == '.')
+      sender[i] = '_';
   if (sender[0] == ':') sender[0] = '_';
 
   handle_token = g_strdup_printf ("mate_screenshot_%u", g_random_int ());
@@ -722,18 +885,17 @@ screenshot_get_pixbuf_portal (gboolean interactive)
   context.uri = NULL;
   context.timeout = FALSE;
 
-  guint sub_id = g_dbus_connection_signal_subscribe (connection,
-                                                     "org.freedesktop.portal.Desktop",
-                                                     "org.freedesktop.portal.Request",
-                                                     "Response",
-                                                     request_path,
-                                                     NULL,
-                                                     G_DBUS_SIGNAL_FLAGS_NONE,
-                                                     on_portal_response,
-                                                     &context,
-                                                     NULL);
+  sub_id = g_dbus_connection_signal_subscribe (connection,
+                                               "org.freedesktop.portal.Desktop",
+                                               "org.freedesktop.portal.Request",
+                                               "Response",
+                                               request_path,
+                                               NULL,
+                                               G_DBUS_SIGNAL_FLAGS_NONE,
+                                               on_portal_response,
+                                               &context,
+                                               NULL);
 
-  GVariantBuilder options_builder;
   g_variant_builder_init (&options_builder, G_VARIANT_TYPE_VARDICT);
   g_variant_builder_add (&options_builder, "{sv}", "handle_token", g_variant_new_string (handle_token));
   g_variant_builder_add (&options_builder, "{sv}", "interactive", g_variant_new_boolean (interactive));
@@ -752,7 +914,8 @@ screenshot_get_pixbuf_portal (gboolean interactive)
 
   if (!ret)
     {
-      g_warning ("Error calling Screenshot portal: %s", error->message);
+      if (interactive)
+        g_warning ("Error calling Screenshot portal: %s", error->message);
       g_clear_error (&error);
       g_dbus_connection_signal_unsubscribe (connection, sub_id);
       g_main_loop_unref (context.loop);
@@ -830,18 +993,34 @@ screenshot_get_pixbuf (GdkWindow    *window,
   gint screen_width, screen_height, scale;
   gint invis_x = 0, invis_y = 0;
 
-  #ifdef MATE_SCREENSHOT_ENABLE_WAYLAND
+#ifdef MATE_SCREENSHOT_ENABLE_WAYLAND
   if (is_wayland ())
     {
       /* If include_mask is FALSE, it means the user wants to capture a specific window
        * or area (not full screen). The basic portal doesn't support specific window capture
        * directly without UI, so we fall back to the interactive portal. */
       gboolean interactive = !include_mask;
+      GdkPixbuf *pixbuf;
+
+      if (rectangle)
+        {
+          pixbuf = screenshot_get_pixbuf_grim (rectangle);
+          if (pixbuf)
+            return pixbuf;
+        }
+
+      if (!interactive)
+        {
+          pixbuf = screenshot_get_pixbuf_grim (NULL);
+          if (pixbuf)
+            return pixbuf;
+        }
+
       return screenshot_get_pixbuf_portal (interactive);
     }
-  #endif
+#endif
 
-  #ifdef GDK_WINDOWING_X11
+#ifdef GDK_WINDOWING_X11
   /* If the screenshot should include the border, we look for the WM window. */
 
   Window client_xid = None;
