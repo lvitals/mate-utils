@@ -1,0 +1,71 @@
+option('mate-dictionary',
+  type: 'boolean',
+  value: true,
+  description: 'Build mate-dictionary utility'
+)
+
+option('baobab',
+  type: 'boolean',
+  value: true,
+  description: 'Build mate-disk-usage-analyzer utility'
+)
+
+option('mate-disk-image-mounter',
+  type: 'boolean',
+  value: true,
+  description: 'Build mate-disk-image-mounter utility'
+)
+
+option('gsearchtool',
+  type: 'boolean',
+  value: true,
+  description: 'Build mate-search-tool utility'
+)
+
+option('mate-screenshot',
+  type: 'boolean',
+  value: true,
+  description: 'Build mate-screenshot utility'
+)
+
+option('logview',
+  type: 'boolean',
+  value: true,
+  description: 'Build mate-system-log utility'
+)
+
+option('in_process',
+  type: 'boolean',
+  value: true,
+  description: 'Build dictionary applet in-process (required for Wayland)'
+)
+
+option('wayland',
+  type: 'feature',
+  value: 'auto',
+  description: 'Enable Wayland support for dictionary applet and screenshot'
+)
+
+option('zlib',
+  type: 'feature',
+  value: 'enabled',
+  description: 'Enable zlib support in logview'
+)
+
+option('systemd',
+  type: 'feature',
+  value: 'auto',
+  description: 'Enable systemd journal support in logview'
+)
+
+option('grep',
+  type: 'string',
+  value: 'auto',
+  description: 'Specify the path to the grep command (default: auto-detected)'
+)
+
+option('enable-debug',
+  type: 'boolean',
+  value: false,
+  description: 'Enable debug messages'
+)
