@@ -119,6 +119,33 @@ static void  save_done_notification (gpointer   data);
 static char *get_desktop_dir        (void);
 static void  save_options           (void);
 
+static gboolean
+settings_schema_has_key (const gchar *key)
+{
+  GSettingsSchema *schema;
+  gboolean has_key = FALSE;
+
+  schema = g_settings_schema_source_lookup (g_settings_schema_source_get_default (),
+                                            MATE_SCREENSHOT_SCHEMA,
+                                            FALSE);
+  if (schema != NULL)
+    {
+      has_key = g_settings_schema_has_key (schema, key);
+      g_settings_schema_unref (schema);
+    }
+
+  return has_key;
+}
+
+static gboolean
+sound_effect_enabled (void)
+{
+  if (!settings_schema_has_key (ENABLE_SOUND_KEY))
+    return TRUE;
+
+  return g_settings_get_boolean (settings, ENABLE_SOUND_KEY);
+}
+
 static GtkWidget *border_check = NULL;
 static GtkWidget *effect_combo = NULL;
 static GtkWidget *effect_label = NULL;
@@ -862,7 +889,7 @@ finish_prepare_screenshot (char *initial_uri, GdkWindow *window, GdkRectangle *r
       exit (1);
     }
 
-  if (g_settings_get_boolean (settings, ENABLE_SOUND_KEY))
+  if (sound_effect_enabled ())
     play_sound_effect (window);
 
   if (noninteractive_clipboard_arg) {
