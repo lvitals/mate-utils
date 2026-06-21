@@ -179,3 +179,5 @@ if get_option('logview')
 endif
 
 subdir('po')
+
+gnome.post_install(glib_compile_schemas: true)
