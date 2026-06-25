@@ -69,7 +69,7 @@ jobs:
           pacman --noconfirm -Sy git || true
           echo "::endgroup::"
       - name: Repository checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: "true"
       - name: Install dependency packages
@@ -81,7 +81,7 @@ jobs:
 
       # INFO: mate-utils depends mate-desktop 1.27.1+, so we should install it from source.
       - name: Cache mate-desktop binary packages
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cache-mate-desktop
         with:
           path: ${{ env.CACHE_PATH }}
