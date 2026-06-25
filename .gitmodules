@@ -1,4 +1,5 @@
 [submodule "gsearchtool/mate-submodules"]
 	path = gsearchtool/mate-submodules
-	url = https://github.com/mate-desktop/mate-submodules
+	url = https://github.com/lvitals/mate-submodules
+	branch = wayland-support
 	ignore = untracked
