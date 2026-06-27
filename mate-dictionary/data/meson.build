@@ -72,8 +72,12 @@ if mate_panel_dep.found()
 
   # DBus service file — only for out-of-process
   if not in_process
+    service_location = join_paths(libexecdir, 'mate-dictionary-applet')
+    if have_wayland
+      service_location = 'env GDK_BACKEND=x11 ' + service_location
+    endif
     service_conf = configuration_data()
-    service_conf.set('LIBEXECDIR', libexecdir)
+    service_conf.set('SERVICE_LOCATION', service_location)
 
     configure_file(
       input:         'org.mate.panel.applet.DictionaryAppletFactory.service.in',

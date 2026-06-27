@@ -171,10 +171,15 @@ gdict_aligned_window_position (GdictAlignedWindow *window)
     return;
 
   align_widget = priv->align_widget;
-  gdk_window = gtk_widget_get_window (align_widget);
 
   display = gdk_display_get_default ();
   gdk_display_flush (display);
+
+  /* make sure the align_widget is realized before we do anything */
+  gtk_widget_realize (align_widget);
+  gdk_window = gtk_widget_get_window (align_widget);
+  if (!gdk_window)
+    return;
 
   gdk_window_get_geometry (gtk_widget_get_window (GTK_WIDGET (window)), NULL, NULL, &our_width, &our_height);
 
@@ -182,9 +187,6 @@ gdict_aligned_window_position (GdictAlignedWindow *window)
   gtk_window_stick (GTK_WINDOW (window));
   gtk_window_set_skip_taskbar_hint (GTK_WINDOW (window), TRUE);
   gtk_window_set_skip_pager_hint (GTK_WINDOW (window), TRUE);
-
-  /* make sure the align_widget is realized before we do anything */
-  gtk_widget_realize (align_widget);
 
   /* get the positional and dimensional attributes of the align widget */
   gdk_window_get_origin (gdk_window,

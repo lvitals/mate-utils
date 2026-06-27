@@ -97,7 +97,7 @@ if have_zlib
   conf.set('HAVE_ZLIB', 1)
 endif
 
-in_process = get_option('in_process')
+in_process = true
 
 wayland_opt = get_option('wayland')
 wayland_deps = []
@@ -114,9 +114,6 @@ if wayland_opt.allowed()
   endif
 endif
 
-if have_wayland and not in_process
-  error('Wayland support requires in_process=true')
-endif
 
 # Wayland support for mate-screenshot
 have_gdk_wayland = false

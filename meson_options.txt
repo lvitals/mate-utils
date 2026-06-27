@@ -34,11 +34,6 @@ option('logview',
   description: 'Build mate-system-log utility'
 )
 
-option('in_process',
-  type: 'boolean',
-  value: true,
-  description: 'Build dictionary applet in-process (required for Wayland)'
-)
 
 option('wayland',
   type: 'feature',
